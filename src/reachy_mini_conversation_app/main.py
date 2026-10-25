@@ -154,10 +154,12 @@ def run(
         except Exception as e:
             logger.warning("Failed to load startup settings: %s", e)
 
-    from reachy_mini_conversation_app.config import ELEVENLABS_BACKEND, config
+    from reachy_mini_conversation_app.config import HERMES_BACKEND, ELEVENLABS_BACKEND, config
 
     if config.REALTIME_BACKEND == ELEVENLABS_BACKEND:
         logger.info("Configured ElevenLabs Agents backend")
+    elif config.REALTIME_BACKEND == HERMES_BACKEND:
+        logger.info("Configured Hermes backend (wake word + ElevenLabs STT/TTS)")
     else:
         logger.info(
             "Configured Hugging Face realtime backend, connection mode: %s",
@@ -205,6 +207,12 @@ def run(
 
     def build_handler(startup_voice: Optional[str] = None) -> ConversationHandler:
         """Build the realtime handler for the configured backend."""
+        if config.REALTIME_BACKEND == HERMES_BACKEND:
+            from reachy_mini_conversation_app.hermes_cascade import HermesCascadeHandler
+
+            logger.info("Using Hermes wake-word handler")
+            return HermesCascadeHandler(deps, instance_path=instance_path, startup_voice=startup_voice)
+
         if config.REALTIME_BACKEND == ELEVENLABS_BACKEND:
             from reachy_mini_conversation_app.elevenlabs_agent import ElevenLabsAgentHandler
 

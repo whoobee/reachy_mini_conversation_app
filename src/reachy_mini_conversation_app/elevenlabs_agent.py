@@ -27,6 +27,13 @@ from reachy_mini_conversation_app.tools import core_tools
 from reachy_mini_conversation_app.config import config, set_custom_profile
 from reachy_mini_conversation_app.prompts import get_session_instructions, get_session_greeting_prompt
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.elevenlabs_api import (
+    voice_name_for,
+    fetch_voice_ids,
+    resolve_voice_id,
+    elevenlabs_http_client,
+    raise_for_elevenlabs_status,
+)
 from reachy_mini_conversation_app.tools.core_tools import ToolSpec, ToolDependencies, get_tool_specs
 from reachy_mini_conversation_app.conversation_handler import QueueItem, AudioFrame, ConversationHandler
 from reachy_mini_conversation_app.tools.background_tool_manager import (
@@ -38,7 +45,6 @@ from reachy_mini_conversation_app.tools.background_tool_manager import (
 
 logger = logging.getLogger(__name__)
 
-ELEVENLABS_API_BASE: Final[str] = "https://api.elevenlabs.io"
 ELEVENLABS_AUDIO_FORMAT: Final[str] = "pcm_16000"
 ELEVENLABS_AGENT_NAME: Final[str] = "Reachy Mini conversation app"
 AGENT_ID_FILENAME: Final[str] = "elevenlabs_agent_id"
@@ -158,18 +164,8 @@ class ElevenLabsAgentHandler(ConversationHandler):
 
     # ---- ElevenLabs REST helpers ----
 
-    def _api_key(self) -> str:
-        api_key = (config.ELEVENLABS_API_KEY or "").strip()
-        if not api_key:
-            raise RuntimeError("ELEVENLABS_API_KEY must be set when REALTIME_BACKEND=elevenlabs")
-        return api_key
-
     def _http_client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            base_url=ELEVENLABS_API_BASE,
-            headers={"xi-api-key": self._api_key()},
-            timeout=15.0,
-        )
+        return elevenlabs_http_client()
 
     def _agent_id_path(self) -> Path:
         root = (
@@ -186,26 +182,18 @@ class ElevenLabsAgentHandler(ConversationHandler):
         except FileNotFoundError:
             return None
 
-    @staticmethod
-    def _raise_for_status(response: httpx.Response) -> None:
-        """Raise with the API error body, which names the rejected field."""
-        if response.is_error:
-            raise RuntimeError(
-                f"ElevenLabs API {response.request.url.path} returned {response.status_code}: {response.text}"
-            )
-
     async def _ensure_agent(self, http: httpx.AsyncClient, body: dict[str, Any]) -> str:
         """Update the configured agent, or create one and remember its ID."""
         agent_id = self._stored_agent_id()
         if agent_id:
             response = await http.patch(f"/v1/convai/agents/{agent_id}", json=body)
             if response.status_code != 404:
-                self._raise_for_status(response)
+                raise_for_elevenlabs_status(response)
                 return agent_id
             logger.warning("ElevenLabs agent %s no longer exists; creating a new one", agent_id)
 
         response = await http.post("/v1/convai/agents/create", json=body)
-        self._raise_for_status(response)
+        raise_for_elevenlabs_status(response)
         agent_id = str(response.json()["agent_id"])
         path = self._agent_id_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -215,24 +203,12 @@ class ElevenLabsAgentHandler(ConversationHandler):
 
     async def _load_voices(self, http: httpx.AsyncClient) -> dict[str, str]:
         """Fetch the account's voices as name -> voice ID."""
-        response = await http.get("/v2/voices", params={"page_size": 100})
-        self._raise_for_status(response)
-        voices = response.json().get("voices", [])
-        self._voice_ids_by_name = {str(v["name"]): str(v["voice_id"]) for v in voices if v.get("name")}
+        self._voice_ids_by_name = await fetch_voice_ids(http)
         return self._voice_ids_by_name
 
     def _resolve_voice_id(self, choice: str | None) -> str | None:
         """Map a voice name or ID to a voice ID, falling back to ELEVENLABS_VOICE_ID."""
-        fallback = (config.ELEVENLABS_VOICE_ID or "").strip() or None
-        if not choice:
-            return fallback
-        by_lowercase = {name.lower(): voice_id for name, voice_id in self._voice_ids_by_name.items()}
-        if choice.lower() in by_lowercase:
-            return by_lowercase[choice.lower()]
-        if choice in self._voice_ids_by_name.values():
-            return choice
-        logger.warning("Ignoring unknown ElevenLabs voice %r; using the default voice", choice)
-        return fallback
+        return resolve_voice_id(choice, self._voice_ids_by_name)
 
     # ---- ConversationHandler contract ----
 
@@ -291,7 +267,7 @@ class ElevenLabsAgentHandler(ConversationHandler):
                 http, build_agent_body(instructions, tool_specs, self._active_voice_id)
             )
             response = await http.get("/v1/convai/conversation/get-signed-url", params={"agent_id": agent_id})
-            self._raise_for_status(response)
+            raise_for_elevenlabs_status(response)
             signed_url = str(response.json()["signed_url"])
 
         logger.info(
@@ -556,10 +532,7 @@ class ElevenLabsAgentHandler(ConversationHandler):
     def get_current_voice(self) -> str:
         """Return the active voice name (or ID when the name is unknown)."""
         voice_id = self._active_voice_id or self._resolve_voice_id(self._voice_choice)
-        for name, candidate in self._voice_ids_by_name.items():
-            if candidate == voice_id:
-                return name
-        return voice_id or self._voice_choice or ""
+        return voice_name_for(voice_id, self._voice_ids_by_name) or voice_id or self._voice_choice or ""
 
     async def change_voice(self, voice: str) -> str:
         """Switch the agent voice; takes effect by restarting the session."""

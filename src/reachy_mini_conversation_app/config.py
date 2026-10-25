@@ -68,8 +68,12 @@ HF_LOCAL_CONNECTION_MODE = "local"
 HF_DEPLOYED_CONNECTION_MODE = "deployed"
 REALTIME_BACKEND_ENV = "REALTIME_BACKEND"
 ELEVENLABS_BACKEND = "elevenlabs"
+HERMES_BACKEND = "hermes"
 ELEVENLABS_DEFAULT_LLM = "gemini-3.5-flash"
 ELEVENLABS_DEFAULT_TTS_MODEL = "eleven_flash_v2_5"
+HERMES_DEFAULT_MODEL = "reachy"
+DEFAULT_WAKE_WORD = "hey_jarvis"
+DEFAULT_WAKE_ACK_TEXT = "Da?"
 HF_REALTIME_SESSION_PROXY_URL = "https://pollen-robotics-reachy-mini-realtime-url.hf.space/session"
 
 
@@ -129,6 +133,18 @@ APP_TIMEOUT_MINUTES_ENV = "REACHY_MINI_APP_TIMEOUT_MINUTES"
 DEFAULT_APP_TIMEOUT_MINUTES = 1440.0
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse a float environment variable, falling back to ``default``."""
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("Invalid float value for %s=%r, using default=%s", name, raw, default)
+        return default
+
+
 def resolve_app_timeout_minutes() -> float | None:
     """Read the app inactivity timeout (minutes) from the environment; None means disabled."""
     raw_value = os.getenv(APP_TIMEOUT_MINUTES_ENV, "").strip()
@@ -163,13 +179,14 @@ def _normalize_realtime_backend(value: str | None) -> str:
     candidate = (value or "").strip().lower()
     if not candidate:
         return HF_BACKEND
-    if candidate not in {HF_BACKEND, ELEVENLABS_BACKEND}:
+    if candidate not in {HF_BACKEND, ELEVENLABS_BACKEND, HERMES_BACKEND}:
         logger.warning(
-            "Invalid %s=%r. Expected %s or %s; using %s.",
+            "Invalid %s=%r. Expected %s, %s or %s; using %s.",
             REALTIME_BACKEND_ENV,
             value,
             HF_BACKEND,
             ELEVENLABS_BACKEND,
+            HERMES_BACKEND,
             HF_BACKEND,
         )
         return HF_BACKEND
@@ -346,6 +363,21 @@ class Config:
     ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
     ELEVENLABS_LLM = os.getenv("ELEVENLABS_LLM") or ELEVENLABS_DEFAULT_LLM
     ELEVENLABS_TTS_MODEL = os.getenv("ELEVENLABS_TTS_MODEL") or ELEVENLABS_DEFAULT_TTS_MODEL
+    HERMES_BASE_URL = os.getenv("HERMES_BASE_URL")
+    HERMES_API_KEY = os.getenv("HERMES_API_KEY")
+    HERMES_MODEL = os.getenv("HERMES_MODEL") or HERMES_DEFAULT_MODEL
+    WAKE_WORD = os.getenv("WAKE_WORD") or DEFAULT_WAKE_WORD
+    WAKE_WORD_THRESHOLD = _env_float("WAKE_WORD_THRESHOLD", 0.5)
+    WAKE_PHRASE = os.getenv("WAKE_PHRASE")
+    WAKE_ACK_TEXT = os.getenv("WAKE_ACK_TEXT", DEFAULT_WAKE_ACK_TEXT)
+    CONVERSATION_TIMEOUT_S = _env_float("CONVERSATION_TIMEOUT_S", 15.0)
+    STT_VAD_SILENCE_S = _env_float("STT_VAD_SILENCE_S", 0.6)
+    BARGE_IN = _env_flag("BARGE_IN", default=True)
+    TTS_GAIN = _env_float("TTS_GAIN", 1.0)
+    ROBOT_MCP_TOKEN = os.getenv("ROBOT_MCP_TOKEN")
+    ROBOT_MCP_HOST = os.getenv("ROBOT_MCP_HOST") or "0.0.0.0"
+    ROBOT_MCP_PORT = int(_env_float("ROBOT_MCP_PORT", 8766))
+    ROBOT_MCP_TOOLS = os.getenv("ROBOT_MCP_TOOLS")
 
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
@@ -464,6 +496,21 @@ def refresh_runtime_config_from_env() -> None:
     config.ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
     config.ELEVENLABS_LLM = os.getenv("ELEVENLABS_LLM") or ELEVENLABS_DEFAULT_LLM
     config.ELEVENLABS_TTS_MODEL = os.getenv("ELEVENLABS_TTS_MODEL") or ELEVENLABS_DEFAULT_TTS_MODEL
+    config.HERMES_BASE_URL = os.getenv("HERMES_BASE_URL")
+    config.HERMES_API_KEY = os.getenv("HERMES_API_KEY")
+    config.HERMES_MODEL = os.getenv("HERMES_MODEL") or HERMES_DEFAULT_MODEL
+    config.WAKE_WORD = os.getenv("WAKE_WORD") or DEFAULT_WAKE_WORD
+    config.WAKE_WORD_THRESHOLD = _env_float("WAKE_WORD_THRESHOLD", 0.5)
+    config.WAKE_PHRASE = os.getenv("WAKE_PHRASE")
+    config.WAKE_ACK_TEXT = os.getenv("WAKE_ACK_TEXT", DEFAULT_WAKE_ACK_TEXT)
+    config.CONVERSATION_TIMEOUT_S = _env_float("CONVERSATION_TIMEOUT_S", 15.0)
+    config.STT_VAD_SILENCE_S = _env_float("STT_VAD_SILENCE_S", 0.6)
+    config.BARGE_IN = _env_flag("BARGE_IN", default=True)
+    config.TTS_GAIN = _env_float("TTS_GAIN", 1.0)
+    config.ROBOT_MCP_TOKEN = os.getenv("ROBOT_MCP_TOKEN")
+    config.ROBOT_MCP_HOST = os.getenv("ROBOT_MCP_HOST") or "0.0.0.0"
+    config.ROBOT_MCP_PORT = int(_env_float("ROBOT_MCP_PORT", 8766))
+    config.ROBOT_MCP_TOOLS = os.getenv("ROBOT_MCP_TOOLS")
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
 
