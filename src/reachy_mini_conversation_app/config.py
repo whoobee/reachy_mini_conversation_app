@@ -66,6 +66,10 @@ HF_REALTIME_WS_URL_ENV = "HF_REALTIME_WS_URL"
 REALTIME_TRANSCRIPTION_LANGUAGE_ENV = "REALTIME_TRANSCRIPTION_LANGUAGE"
 HF_LOCAL_CONNECTION_MODE = "local"
 HF_DEPLOYED_CONNECTION_MODE = "deployed"
+REALTIME_BACKEND_ENV = "REALTIME_BACKEND"
+ELEVENLABS_BACKEND = "elevenlabs"
+ELEVENLABS_DEFAULT_LLM = "gemini-3.5-flash"
+ELEVENLABS_DEFAULT_TTS_MODEL = "eleven_flash_v2_5"
 HF_REALTIME_SESSION_PROXY_URL = "https://pollen-robotics-reachy-mini-realtime-url.hf.space/session"
 
 
@@ -151,6 +155,24 @@ def _normalize_hf_connection_mode(value: str | None) -> str | None:
             value,
         )
         return None
+    return candidate
+
+
+def _normalize_realtime_backend(value: str | None) -> str:
+    """Return the configured realtime backend, defaulting to Hugging Face."""
+    candidate = (value or "").strip().lower()
+    if not candidate:
+        return HF_BACKEND
+    if candidate not in {HF_BACKEND, ELEVENLABS_BACKEND}:
+        logger.warning(
+            "Invalid %s=%r. Expected %s or %s; using %s.",
+            REALTIME_BACKEND_ENV,
+            value,
+            HF_BACKEND,
+            ELEVENLABS_BACKEND,
+            HF_BACKEND,
+        )
+        return HF_BACKEND
     return candidate
 
 
@@ -318,6 +340,12 @@ class Config:
     HF_REALTIME_WS_URL = os.getenv(HF_REALTIME_WS_URL_ENV)
     REALTIME_TRANSCRIPTION_LANGUAGE = _normalize_transcription_language(os.getenv(REALTIME_TRANSCRIPTION_LANGUAGE_ENV))
     HF_TOKEN = os.getenv("HF_TOKEN")  # Optional, falls back to hf auth login if not set
+    REALTIME_BACKEND = _normalize_realtime_backend(os.getenv(REALTIME_BACKEND_ENV))
+    ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+    ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID")
+    ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
+    ELEVENLABS_LLM = os.getenv("ELEVENLABS_LLM") or ELEVENLABS_DEFAULT_LLM
+    ELEVENLABS_TTS_MODEL = os.getenv("ELEVENLABS_TTS_MODEL") or ELEVENLABS_DEFAULT_TTS_MODEL
 
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
@@ -430,6 +458,12 @@ def refresh_runtime_config_from_env() -> None:
         os.getenv(REALTIME_TRANSCRIPTION_LANGUAGE_ENV)
     )
     config.HF_TOKEN = os.getenv("HF_TOKEN")
+    config.REALTIME_BACKEND = _normalize_realtime_backend(os.getenv(REALTIME_BACKEND_ENV))
+    config.ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
+    config.ELEVENLABS_AGENT_ID = os.getenv("ELEVENLABS_AGENT_ID")
+    config.ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID")
+    config.ELEVENLABS_LLM = os.getenv("ELEVENLABS_LLM") or ELEVENLABS_DEFAULT_LLM
+    config.ELEVENLABS_TTS_MODEL = os.getenv("ELEVENLABS_TTS_MODEL") or ELEVENLABS_DEFAULT_TTS_MODEL
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
 

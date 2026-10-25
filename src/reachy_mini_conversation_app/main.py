@@ -154,10 +154,15 @@ def run(
         except Exception as e:
             logger.warning("Failed to load startup settings: %s", e)
 
-    logger.info(
-        "Configured Hugging Face realtime backend, connection mode: %s",
-        get_hf_connection_selection().mode,
-    )
+    from reachy_mini_conversation_app.config import ELEVENLABS_BACKEND, config
+
+    if config.REALTIME_BACKEND == ELEVENLABS_BACKEND:
+        logger.info("Configured ElevenLabs Agents backend")
+    else:
+        logger.info(
+            "Configured Hugging Face realtime backend, connection mode: %s",
+            get_hf_connection_selection().mode,
+        )
 
     from reachy_mini_conversation_app.console import LocalStream
     from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
@@ -199,7 +204,13 @@ def run(
     )
 
     def build_handler(startup_voice: Optional[str] = None) -> ConversationHandler:
-        """Build a Hugging Face realtime handler for the current runtime config."""
+        """Build the realtime handler for the configured backend."""
+        if config.REALTIME_BACKEND == ELEVENLABS_BACKEND:
+            from reachy_mini_conversation_app.elevenlabs_agent import ElevenLabsAgentHandler
+
+            logger.info("Using ElevenLabs Agents handler")
+            return ElevenLabsAgentHandler(deps, instance_path=instance_path, startup_voice=startup_voice)
+
         from reachy_mini_conversation_app.huggingface_realtime import HuggingFaceRealtimeHandler
 
         hf_connection_selection = get_hf_connection_selection()

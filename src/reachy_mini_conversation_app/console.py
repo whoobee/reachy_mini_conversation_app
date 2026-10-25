@@ -29,7 +29,6 @@ from reachy_mini_conversation_app.config import (
     get_default_voice,
     get_hf_session_url,
     set_custom_profile,
-    get_available_voices,
     get_hf_direct_ws_url,
     build_hf_direct_ws_url,
     has_hf_realtime_target,
@@ -462,8 +461,8 @@ class LocalStream:
         return "Applied personality and restarting backend."
 
     async def get_available_voices(self) -> list[str]:
-        """Return the voices available for the Hugging Face backend."""
-        return get_available_voices()
+        """Return the voices available for the active backend."""
+        return await self.handler.get_available_voices()
 
     def get_current_voice(self) -> str:
         """Return the currently selected voice override or profile voice."""

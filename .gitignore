@@ -13,6 +13,7 @@ env/
 
 # Environment variables
 .env
+elevenlabs_agent_id
 
 # Build and distribution
 build/
