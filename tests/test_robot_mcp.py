@@ -65,3 +65,30 @@ def test_mcp_endpoint_requires_the_bearer_token_and_runs_tools(monkeypatch: Any)
     result = response.json()["result"]
     assert json.loads(result["content"][0]["text"]) == {"status": "ok"}
     assert calls == [("volume_control", '{"level": 50}')]
+
+
+@pytest.mark.asyncio
+async def test_extra_tools_replace_app_tools_with_the_same_name(monkeypatch: Any) -> None:
+    """A handler-provided tool (e.g. the deferred go_to_sleep) is listed and called instead of the app tool."""
+    from mcp import types
+
+    calls: list[tuple[str, str]] = []
+    monkeypatch.setattr(rm_mod, "get_tool_specs", lambda: [_spec("volume_control"), _spec("go_to_sleep")])
+
+    async def deferred_sleep(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"status": "sleeping later"}
+
+    deps = ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock())
+    sleep_tool = types.Tool(name="go_to_sleep", description="sleep after reply", inputSchema={"type": "object"})
+    server = RobotMcpServer(
+        deps,
+        ("volume_control", "go_to_sleep"),
+        "127.0.0.1",
+        0,
+        "secret",
+        extra_tools={"go_to_sleep": (sleep_tool, deferred_sleep)},
+    )
+
+    assert [t.description for t in server.tool_definitions() if t.name == "go_to_sleep"] == ["sleep after reply"]
+    assert await server.call("go_to_sleep", {}) == {"status": "sleeping later"}
+    assert calls == []

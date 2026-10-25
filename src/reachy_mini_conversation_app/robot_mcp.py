@@ -11,7 +11,7 @@ import asyncio
 import logging
 from typing import Any, Final
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator
+from collections.abc import Callable, Awaitable, AsyncIterator
 
 import uvicorn
 from mcp import types
@@ -50,27 +50,44 @@ def parse_tool_names(value: str | None) -> tuple[str, ...]:
 class RobotMcpServer:
     """Streamable-HTTP MCP server offering a fixed set of robot tools."""
 
-    def __init__(self, deps: ToolDependencies, tool_names: tuple[str, ...], host: str, port: int, token: str) -> None:
-        """Prepare the server; call ``serve`` to run it."""
+    def __init__(
+        self,
+        deps: ToolDependencies,
+        tool_names: tuple[str, ...],
+        host: str,
+        port: int,
+        token: str,
+        extra_tools: dict[str, tuple[types.Tool, Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]]] | None = None,
+    ) -> None:
+        """Prepare the server; call ``serve`` to run it.
+
+        ``extra_tools`` adds handler-provided tools (definition, coroutine) that take
+        precedence over app tools with the same name.
+        """
         if not token:
             raise ValueError("RobotMcpServer needs a bearer token")
         self._deps = deps
-        self._allowed = frozenset(tool_names)
+        self._extra = dict(extra_tools or {})
+        self._allowed = frozenset(tool_names) - set(self._extra)
         self._host = host
         self._port = port
         self._token = token
         self._uvicorn: uvicorn.Server | None = None
 
     def tool_definitions(self) -> list[types.Tool]:
-        """Return the MCP tool definitions for the allowed app tools."""
-        return [
+        """Return the MCP tool definitions for the allowed app tools and the extra tools."""
+        app_tools = [
             types.Tool(name=spec["name"], description=spec["description"], inputSchema=spec["parameters"])
             for spec in get_tool_specs()
             if spec["name"] in self._allowed
         ]
+        return app_tools + [definition for definition, _ in self._extra.values()]
 
     async def call(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Run one allowed robot tool and return its result."""
+        if name in self._extra:
+            logger.info("Robot MCP tool call: %s %s", name, arguments)
+            return await self._extra[name][1](arguments)
         if name not in self._allowed:
             return {"error": f"tool not available: {name}"}
         logger.info("Robot MCP tool call: %s %s", name, arguments)
@@ -118,7 +135,10 @@ class RobotMcpServer:
         config = uvicorn.Config(self.build_app(), host=self._host, port=self._port, log_level="warning", lifespan="on")
         self._uvicorn = uvicorn.Server(config)
         logger.info(
-            "Robot MCP server on http://%s:%d/mcp with tools %s", self._host, self._port, sorted(self._allowed)
+            "Robot MCP server on http://%s:%d/mcp with tools %s",
+            self._host,
+            self._port,
+            sorted(self._allowed | set(self._extra)),
         )
         await self._uvicorn.serve()
 

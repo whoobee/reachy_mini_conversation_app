@@ -26,6 +26,7 @@ from urllib.parse import urlencode
 
 import httpx
 import numpy as np
+from mcp import types as mcp_types
 from numpy.typing import NDArray
 from websockets.asyncio.client import ClientConnection, connect
 
@@ -301,6 +302,7 @@ class HermesCascadeHandler(ConversationHandler):
         self._running = False
         self._stopped = asyncio.Event()
         self._robot_mcp: RobotMcpServer | None = None
+        self._sleep_requested = False
         self._robot_mcp_task: asyncio.Task[None] | None = None
 
         # Conversation state
@@ -374,8 +376,12 @@ class HermesCascadeHandler(ConversationHandler):
             await self._end_conversation("handler stopped")
 
     async def _supervise(self) -> None:
-        """Track playback end and close conversations after the silence timeout."""
+        """Track playback end, run a requested sleep, and close conversations after the silence timeout."""
         now = time.monotonic()
+        if self._sleep_requested and not self._is_generating() and now >= self._playback_until:
+            self._sleep_requested = False
+            await self._go_to_sleep()
+            return
         if self._speaking and now >= self._playback_until and not self._is_generating():
             self._speaking = False
             self.deps.movement_manager.set_speaking(False)
@@ -393,12 +399,22 @@ class HermesCascadeHandler(ConversationHandler):
         if not token:
             logger.info("ROBOT_MCP_TOKEN not set; Hermes gets no robot tools")
             return
+        sleep_tool = mcp_types.Tool(
+            name="go_to_sleep",
+            description=(
+                "Put Reachy to sleep and turn the conversation app off: it finishes speaking, moves to the sleep "
+                "pose and stops listening completely (no wake word). Use only when the user explicitly asks Reachy "
+                "to go to sleep or turn off; never for silence, tiredness or a sleepy mood."
+            ),
+            inputSchema={"type": "object", "properties": {}},
+        )
         self._robot_mcp = RobotMcpServer(
             self.deps,
             parse_tool_names(config.ROBOT_MCP_TOOLS),
             config.ROBOT_MCP_HOST,
             config.ROBOT_MCP_PORT,
             token,
+            extra_tools={"go_to_sleep": (sleep_tool, self._request_sleep)},
         )
         self._robot_mcp_task = asyncio.create_task(self._robot_mcp.serve(), name="robot-mcp")
 
@@ -432,6 +448,26 @@ class HermesCascadeHandler(ConversationHandler):
         """Log idle-behavior tools; their results are not sent anywhere."""
         if completed_tool.error is not None:
             logger.warning("Idle tool '%s' failed: %s", completed_tool.tool_name, completed_tool.error)
+
+    # ---- sleep ----
+
+    async def _request_sleep(self, _arguments: dict[str, Any]) -> dict[str, Any]:
+        """Turn off once the current reply has been spoken, so the goodbye is heard."""
+        if self.deps.go_to_sleep is None:
+            return {"error": "go_to_sleep is unavailable in this runtime"}
+        self._sleep_requested = True
+        return {"status": "going to sleep and turning off after this reply"}
+
+    async def _go_to_sleep(self) -> None:
+        """Run the app's sleep-and-stop routine (sleep pose, then the app stops)."""
+        await self._end_conversation("going to sleep")
+        if self.deps.go_to_sleep is None:
+            return
+        logger.info("Going to sleep and stopping the app")
+        try:
+            await asyncio.to_thread(self.deps.go_to_sleep)
+        except Exception as e:
+            logger.error("go_to_sleep failed: %s", e)
 
     # ---- microphone ----
 

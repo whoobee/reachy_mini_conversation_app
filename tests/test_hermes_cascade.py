@@ -222,3 +222,23 @@ def test_speakable_drops_emoji_and_leaked_tool_markup() -> None:
 
     assert hc_mod.speakable(leaked) == "Să număr: Uau!"
     assert hc_mod.speakable("Gata, lumină! 🤖") == "Gata, lumină!"
+
+
+@pytest.mark.asyncio
+async def test_sleep_request_turns_off_after_the_reply() -> None:
+    """go_to_sleep waits until the goodbye has been spoken, then runs the app's sleep-and-stop routine."""
+    handler = _handler()
+    handler._detector = MagicMock()
+    go_to_sleep = MagicMock(return_value={"status": "sleeping"})
+    handler.deps.go_to_sleep = go_to_sleep
+    handler._playback_until = time.monotonic() + 60  # still speaking
+
+    result = await handler._request_sleep({})
+    assert "turning off" in result["status"]
+    await handler._supervise()
+    go_to_sleep.assert_not_called()
+
+    handler._playback_until = 0.0
+    await handler._supervise()
+    go_to_sleep.assert_called_once()
+    assert not handler._active
