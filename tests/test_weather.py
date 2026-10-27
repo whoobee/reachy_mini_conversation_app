@@ -7,7 +7,7 @@ from reachy_mini_conversation_app.weather import WeatherService
 GEOCODE = {
     "results": [
         {
-            "name": "Hasselborn",
+            "name": "Neustadt",
             "admin1": "Niedersachsen",
             "admin3": "Elsewhere",
             "country": "Deutschland",
@@ -16,9 +16,9 @@ GEOCODE = {
             "longitude": 9.0,
         },
         {
-            "name": "Hasselborn",
+            "name": "Neustadt",
             "admin1": "Hessen",
-            "admin3": "Waldsolms",
+            "admin3": "Marburg-Biedenkopf",
             "country": "Deutschland",
             "country_code": "DE",
             "latitude": 50.41,
@@ -40,12 +40,12 @@ FORECAST = {
 }
 
 
-def _service(requests: list[httpx.Request], home: str | None = "Hasselborn, Waldsolms") -> WeatherService:
+def _service(requests: list[httpx.Request], home: str | None = "Neustadt, Marburg-Biedenkopf") -> WeatherService:
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if "geocoding" in request.url.host:
             name = request.url.params["name"]
-            return httpx.Response(200, json=GEOCODE if name == "Hasselborn" else {})
+            return httpx.Response(200, json=GEOCODE if name == "Neustadt" else {})
         return httpx.Response(200, json=FORECAST)
 
     return WeatherService(home, http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
@@ -60,7 +60,7 @@ async def test_home_forecast_picks_the_matching_place_and_speaks_romanian() -> N
     forecast_request = requests[-1]
     assert forecast_request.url.params["latitude"] == "50.41"
     assert forecast_request.url.params["forecast_days"] == "2"
-    assert result["location"] == "Hasselborn, Waldsolms, Deutschland"
+    assert result["location"] == "Neustadt, Marburg-Biedenkopf, Deutschland"
     assert result["now"] == {"temperature_c": 7, "feels_like_c": 5, "conditions": "parțial noros", "wind_kmh": 10}
     assert [(d["weekday"], d["conditions"], d["min_c"], d["max_c"]) for d in result["days"]] == [
         ("luni", "înnorat", 6, 8),

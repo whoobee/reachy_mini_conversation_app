@@ -1,7 +1,7 @@
 """Weather forecasts from Open-Meteo (free, no API key), with Romanian condition names.
 
 Place names are geocoded with Open-Meteo's geocoding API. A name like
-"Hasselborn, Waldsolms, Germany" searches for the first part and prefers results whose
+"Neustadt, Hessen, Germany" searches for the first part and prefers results whose
 region or country matches the other parts.
 """
 
@@ -90,7 +90,13 @@ class WeatherService:
         def matches(result: dict[str, Any]) -> int:
             fields = [str(result.get(f) or "").lower() for f in ("admin1", "admin2", "admin3", "admin4", "country")]
             fields.append(str(result.get("country_code") or "").lower())
-            return sum(1 for hint in hints if any(hint in field or field in hint for field in fields if field))
+
+            def hit(hint: str, field: str) -> bool:
+                if len(field) <= 2 or len(hint) <= 2:  # country codes: exact only ("de" is inside "Biedenkopf")
+                    return hint == field
+                return hint in field or field in hint
+
+            return sum(1 for hint in hints if any(hit(hint, field) for field in fields if field))
 
         best: dict[str, Any] = max(results, key=matches)
         self._geocode_cache[key] = best
