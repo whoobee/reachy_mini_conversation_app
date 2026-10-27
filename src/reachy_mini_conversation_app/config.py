@@ -369,8 +369,10 @@ class Config:
     WAKE_WORD = os.getenv("WAKE_WORD") or DEFAULT_WAKE_WORD
     WAKE_WORD_THRESHOLD = _env_float("WAKE_WORD_THRESHOLD", 0.5)
     WAKE_PHRASE = os.getenv("WAKE_PHRASE")
+    WAKE_WORD_VAD_THRESHOLD = _env_float("WAKE_WORD_VAD_THRESHOLD", 0.5)
+    WAKE_WORD_SAVE_CLIPS = _env_flag("WAKE_WORD_SAVE_CLIPS", default=True)
     WAKE_ACK_TEXT = os.getenv("WAKE_ACK_TEXT", DEFAULT_WAKE_ACK_TEXT)
-    CONVERSATION_TIMEOUT_S = _env_float("CONVERSATION_TIMEOUT_S", 15.0)
+    CONVERSATION_TIMEOUT_S = _env_float("CONVERSATION_TIMEOUT_S", 5.0)
     STT_VAD_SILENCE_S = _env_float("STT_VAD_SILENCE_S", 0.6)
     BARGE_IN = _env_flag("BARGE_IN", default=True)
     TTS_GAIN = _env_float("TTS_GAIN", 1.0)
@@ -378,6 +380,11 @@ class Config:
     ROBOT_MCP_HOST = os.getenv("ROBOT_MCP_HOST") or "0.0.0.0"
     ROBOT_MCP_PORT = int(_env_float("ROBOT_MCP_PORT", 8766))
     ROBOT_MCP_TOOLS = os.getenv("ROBOT_MCP_TOOLS")
+    ALARM_TIMEZONE = os.getenv("ALARM_TIMEZONE")
+    WEATHER_LOCATION = os.getenv("WEATHER_LOCATION")
+    ANTENNA_SLEEP_GESTURE = _env_flag("ANTENNA_SLEEP_GESTURE", default=True)
+    ANTENNA_SLEEP_DOWN_RAD = _env_float("ANTENNA_SLEEP_DOWN_RAD", 0.6)
+    ANTENNA_SLEEP_HOLD_S = _env_float("ANTENNA_SLEEP_HOLD_S", 0.3)
 
     logger.debug(
         "HF mode: %s, HF session URL set: %s, HF direct URL set: %s",
@@ -477,6 +484,20 @@ class Config:
 config = Config()
 
 
+def persist_env_value(env_path: Path, key: str, value: str) -> None:
+    """Set ``key=value`` in a dotenv file, replacing an existing assignment or appending one."""
+    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    assignment = f"{key}={value}"
+    for index, line in enumerate(lines):
+        if line.strip().startswith(f"{key}="):
+            lines[index] = assignment
+            break
+    else:
+        lines.append(assignment)
+    env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    os.environ[key] = value
+
+
 def refresh_runtime_config_from_env() -> None:
     """Refresh mutable runtime config fields from the current environment."""
     _warn_on_obsolete_backend_env()
@@ -502,8 +523,10 @@ def refresh_runtime_config_from_env() -> None:
     config.WAKE_WORD = os.getenv("WAKE_WORD") or DEFAULT_WAKE_WORD
     config.WAKE_WORD_THRESHOLD = _env_float("WAKE_WORD_THRESHOLD", 0.5)
     config.WAKE_PHRASE = os.getenv("WAKE_PHRASE")
+    config.WAKE_WORD_VAD_THRESHOLD = _env_float("WAKE_WORD_VAD_THRESHOLD", 0.5)
+    config.WAKE_WORD_SAVE_CLIPS = _env_flag("WAKE_WORD_SAVE_CLIPS", default=True)
     config.WAKE_ACK_TEXT = os.getenv("WAKE_ACK_TEXT", DEFAULT_WAKE_ACK_TEXT)
-    config.CONVERSATION_TIMEOUT_S = _env_float("CONVERSATION_TIMEOUT_S", 15.0)
+    config.CONVERSATION_TIMEOUT_S = _env_float("CONVERSATION_TIMEOUT_S", 5.0)
     config.STT_VAD_SILENCE_S = _env_float("STT_VAD_SILENCE_S", 0.6)
     config.BARGE_IN = _env_flag("BARGE_IN", default=True)
     config.TTS_GAIN = _env_float("TTS_GAIN", 1.0)
@@ -511,6 +534,11 @@ def refresh_runtime_config_from_env() -> None:
     config.ROBOT_MCP_HOST = os.getenv("ROBOT_MCP_HOST") or "0.0.0.0"
     config.ROBOT_MCP_PORT = int(_env_float("ROBOT_MCP_PORT", 8766))
     config.ROBOT_MCP_TOOLS = os.getenv("ROBOT_MCP_TOOLS")
+    config.ALARM_TIMEZONE = os.getenv("ALARM_TIMEZONE")
+    config.WEATHER_LOCATION = os.getenv("WEATHER_LOCATION")
+    config.ANTENNA_SLEEP_GESTURE = _env_flag("ANTENNA_SLEEP_GESTURE", default=True)
+    config.ANTENNA_SLEEP_DOWN_RAD = _env_float("ANTENNA_SLEEP_DOWN_RAD", 0.6)
+    config.ANTENNA_SLEEP_HOLD_S = _env_float("ANTENNA_SLEEP_HOLD_S", 0.3)
     config.REACHY_MINI_CUSTOM_PROFILE = LOCKED_PROFILE or os.getenv("REACHY_MINI_CUSTOM_PROFILE")
 
 

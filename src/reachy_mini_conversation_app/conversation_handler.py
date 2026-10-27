@@ -73,6 +73,10 @@ class ConversationHandler(AsyncStreamHandler, ABC):
         """Return whether idle behavior may run now. Backends can add guards."""
         return True
 
+    def is_busy(self) -> bool:
+        """Return True while a conversation turn is in progress (listening, thinking or speaking)."""
+        return False
+
     async def emit(self) -> HandlerOutput:
         """Emit the next queued output, triggering local idle behavior when due."""
         now = time.monotonic()

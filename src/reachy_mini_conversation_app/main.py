@@ -109,6 +109,9 @@ def main() -> None:
     run(args)
 
 
+_BACKEND_SWITCH_DELAY_S = 8.0
+
+
 def run(
     args: argparse.Namespace,
     robot: ReachyMini = None,
@@ -318,6 +321,41 @@ def run(
 
     deps.go_to_sleep = go_to_sleep_and_stop_app
 
+    switch_tasks: set[asyncio.Task[None]] = set()
+
+    async def switch_backend(backend: str) -> dict[str, Any]:
+        """Persist the requested backend and rebuild the handler after the spoken reply."""
+        from reachy_mini_conversation_app.config import (
+            HF_BACKEND,
+            HERMES_BACKEND,
+            REALTIME_BACKEND_ENV,
+            config,
+            persist_env_value,
+        )
+
+        target = HF_BACKEND if backend == "huggingface" else HERMES_BACKEND
+        if config.REALTIME_BACKEND == target:
+            return {"status": f"already using the {backend} backend"}
+        if target == HERMES_BACKEND and not (
+            (config.HERMES_BASE_URL or "").strip() and (config.HERMES_API_KEY or "").strip()
+        ):
+            return {"error": "the hermes backend is not configured (HERMES_BASE_URL / HERMES_API_KEY)"}
+        if instance_path is not None:
+            persist_env_value(Path(instance_path) / ".env", REALTIME_BACKEND_ENV, target)
+        config.REALTIME_BACKEND = target
+        logger.info("Switching conversation backend to %s", target)
+
+        async def restart_later() -> None:
+            await asyncio.sleep(_BACKEND_SWITCH_DELAY_S)  # let the confirmation be spoken first
+            await stream_manager.request_backend_restart("backend_switched")
+
+        task = asyncio.create_task(restart_later(), name="backend-switch")
+        switch_tasks.add(task)
+        task.add_done_callback(switch_tasks.discard)
+        return {"status": f"switching to the {backend} backend in a few seconds"}
+
+    deps.switch_backend = switch_backend
+
     def run_go_to_sleep_tool() -> dict[str, Any]:
         return app_lifecycle.run_go_to_sleep_tool(deps, logger)
 
@@ -342,6 +380,22 @@ def run(
     # taps the media pipeline at push_audio_sample. The console stream pushes
     # assistant audio through that pipeline directly.
     robot.enable_wobbling()
+
+    from reachy_mini_conversation_app.config import config as runtime_config
+
+    antenna_gesture = None
+    if runtime_config.ANTENNA_SLEEP_GESTURE:
+        from reachy_mini_conversation_app.antenna_gesture import AntennaSleepGesture
+
+        antenna_gesture = AntennaSleepGesture(
+            robot,
+            movement_manager,
+            on_trigger=go_to_sleep_and_stop_app,
+            is_busy=lambda: stream_manager.handler.is_busy(),
+            down_position_rad=runtime_config.ANTENNA_SLEEP_DOWN_RAD,
+            hold_s=runtime_config.ANTENNA_SLEEP_HOLD_S,
+        )
+        antenna_gesture.start()
 
     timeout_minutes = resolve_app_timeout_minutes()
     if timeout_minutes is not None:
@@ -381,6 +435,8 @@ def run(
         # the shutdown came from the voice go_to_sleep tool the robot is
         # already in the sleep pose; on a plain stop it stays awake and
         # the daemon returns it to neutral once the process exits.
+        if antenna_gesture is not None:
+            antenna_gesture.stop()
         movement_manager.stop(reset_to_neutral=False)
         try:
             robot.disable_wobbling()

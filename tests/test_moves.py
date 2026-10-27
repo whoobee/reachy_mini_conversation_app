@@ -187,3 +187,17 @@ def test_handle_command_queue_and_clear() -> None:
     manager._handle_command("clear_queue", None, now)
     assert len(manager.move_queue) == 0
     assert manager.state.current_move is None
+
+
+def test_antenna_override_replaces_only_the_overridden_antenna() -> None:
+    """An antenna override holds that antenna while the other keeps its animated command."""
+    from unittest.mock import MagicMock
+
+    from reachy_mini_conversation_app.moves import MovementManager
+
+    manager = MovementManager(current_robot=MagicMock())
+    assert manager._apply_antenna_overrides((0.1, -0.1)) == (0.1, -0.1)
+    manager.set_antenna_override(0, -0.7)
+    assert manager._apply_antenna_overrides((0.1, -0.1)) == (-0.7, -0.1)
+    manager.set_antenna_override(0, None)
+    assert manager._apply_antenna_overrides((0.1, -0.1)) == (0.1, -0.1)

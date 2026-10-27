@@ -155,6 +155,7 @@ def test_transcript_cleanup_drops_wake_phrase_and_fillers() -> None:
     """The wake phrase is stripped and hesitation-only utterances are recognised."""
     assert hc_mod.strip_wake_phrase("Hey, Jarvis! Aprinde lumina.", "hey_jarvis") == "Aprinde lumina."
     assert hc_mod.strip_wake_phrase("Hey, Jarvis!", "hey_jarvis") == ""
+    assert hc_mod.strip_wake_phrase("Hei, Richie, aprinde lumina!", "hey reachy|hei richie") == "aprinde lumina!"
     assert hc_mod.is_filler_only("Ăăă-")
     assert hc_mod.is_filler_only("Hmm...")
     assert not hc_mod.is_filler_only("mama")
@@ -242,3 +243,63 @@ async def test_sleep_request_turns_off_after_the_reply() -> None:
     await handler._supervise()
     go_to_sleep.assert_called_once()
     assert not handler._active
+
+
+@pytest.mark.asyncio
+async def test_listening_time_can_be_read_changed_and_is_persisted(tmp_path: Any, monkeypatch: Any) -> None:
+    """set_listening_time reads the value, rejects out-of-range input, and saves valid changes to .env."""
+    monkeypatch.setattr(config, "CONVERSATION_TIMEOUT_S", 5.0)
+    monkeypatch.delenv("CONVERSATION_TIMEOUT_S", raising=False)
+    handler = HermesCascadeHandler(
+        ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()), instance_path=str(tmp_path)
+    )
+
+    assert (await handler._set_listening_time({}))["listening_time_seconds"] == 5.0
+    assert "error" in await handler._set_listening_time({"seconds": 45})
+    assert "error" in await handler._set_listening_time({"seconds": 0})
+    result = await handler._set_listening_time({"seconds": 12})
+
+    assert result["listening_time_seconds"] == 12 and result["previous_seconds"] == 5.0
+    assert config.CONVERSATION_TIMEOUT_S == 12.0
+    assert "CONVERSATION_TIMEOUT_S=12" in (tmp_path / ".env").read_text(encoding="utf-8")
+
+
+def test_listening_time_is_clamped_to_the_allowed_range(monkeypatch: Any) -> None:
+    """A hand-edited out-of-range .env value is kept within 1-30 s."""
+    monkeypatch.setattr(config, "CONVERSATION_TIMEOUT_S", 300.0)
+    assert HermesCascadeHandler._listen_time() == 30.0
+    monkeypatch.setattr(config, "CONVERSATION_TIMEOUT_S", 0.0)
+    assert HermesCascadeHandler._listen_time() == 1.0
+
+
+def test_save_wake_clip_writes_audio_and_prunes(tmp_path: Any) -> None:
+    """Each wake keeps a short WAV named with its score; only the newest clips are kept."""
+    audio = np.ones(1600, dtype=np.int16)
+    for _ in range(3):
+        hc_mod.save_wake_clip(tmp_path, audio, 0.91, keep=2)
+        time.sleep(1.05)  # distinct timestamps in the file names
+
+    clips = sorted(tmp_path.glob("wake_*.wav"))
+    assert len(clips) == 2 and clips[-1].name.endswith("_0.91.wav")
+
+
+@pytest.mark.asyncio
+async def test_wake_saves_the_triggering_audio(monkeypatch: Any, tmp_path: Any) -> None:
+    """When the detector fires, the last seconds of idle audio and the score are saved before waking."""
+    monkeypatch.setattr(config, "WAKE_WORD_SAVE_CLIPS", True)
+    handler = HermesCascadeHandler(
+        ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()), instance_path=str(tmp_path)
+    )
+    handler._running = True
+    detector = MagicMock()
+    detector.process.side_effect = [False, True]
+    detector.last_score = 0.93
+    handler._detector = detector
+    monkeypatch.setattr(handler, "_wake", AsyncMock())
+
+    await handler.receive((16000, np.ones(1280, dtype=np.int16)))
+    await handler.receive((16000, np.ones(1280, dtype=np.int16)))
+
+    clips = list((tmp_path / "wake_clips").glob("wake_*_0.93.wav"))
+    assert len(clips) == 1
+    handler._wake.assert_awaited_once()  # type: ignore[attr-defined]

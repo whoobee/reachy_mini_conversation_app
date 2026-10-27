@@ -234,6 +234,9 @@ class MovementManager:
         self._shared_last_activity_time = self.state.last_activity_time
         self._shared_is_listening = self._is_listening
         self._status_lock = threading.Lock()
+        # Per-antenna position overrides (e.g. following a hand push); None = normal motion.
+        self._antenna_overrides: list[float | None] = [None, None]
+        self._override_lock = threading.Lock()
         self._freq_stats = LoopFrequencyStats()
         self._freq_snapshot = LoopFrequencyStats()
 
@@ -270,6 +273,27 @@ class MovementManager:
             return False
 
         return self._now() - last_activity >= self.idle_inactivity_delay
+
+    def is_idle_animation(self) -> bool:
+        """Return True while only the idle breathing animation is running (nothing queued, not listening)."""
+        with self._shared_state_lock:
+            listening = self._shared_is_listening
+        return isinstance(self.state.current_move, BreathingMove) and not self.move_queue and not listening
+
+    def set_antenna_override(self, index: int, value: float | None) -> None:
+        """Hold antenna ``index`` (0 or 1) at ``value`` instead of the animation; None returns it to normal."""
+        with self._override_lock:
+            self._antenna_overrides[index] = None if value is None else float(value)
+
+    def _apply_antenna_overrides(self, antennas: Tuple[float, float]) -> Tuple[float, float]:
+        with self._override_lock:
+            overrides = list(self._antenna_overrides)
+        if overrides == [None, None]:
+            return antennas
+        return (
+            antennas[0] if overrides[0] is None else overrides[0],
+            antennas[1] if overrides[1] is None else overrides[1],
+        )
 
     def set_listening(self, listening: bool) -> None:
         """Enable or disable listening mode without touching shared state directly.
@@ -746,7 +770,7 @@ class MovementManager:
             head, antennas, body_yaw = self._get_primary_pose(loop_start)
 
             # 4) Apply listening antenna freeze or blend-back
-            antennas_cmd = self._calculate_blended_antennas(antennas)
+            antennas_cmd = self._apply_antenna_overrides(self._calculate_blended_antennas(antennas))
 
             # 5) Single set_target call - the only control point
             self._issue_control_command(head, antennas_cmd, body_yaw)

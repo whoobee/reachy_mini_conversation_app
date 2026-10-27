@@ -38,6 +38,7 @@ DEFAULT_ROBOT_MCP_TOOLS: Final[tuple[str, ...]] = (
     "sweep_look",
     "head_tracking",
     "robot_status",
+    "switch_backend",
 )
 
 

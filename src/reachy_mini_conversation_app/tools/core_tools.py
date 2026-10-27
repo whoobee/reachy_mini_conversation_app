@@ -8,7 +8,7 @@ import importlib
 import threading
 import importlib.util
 from types import ModuleType
-from typing import TYPE_CHECKING, Any, Dict, List, Literal, Callable, ClassVar, Sequence, TypedDict
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Callable, ClassVar, Sequence, Awaitable, TypedDict
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -44,6 +44,7 @@ class ToolDependencies:
     camera_enabled: bool = False
     motion_duration_s: float = 1.0
     go_to_sleep: Callable[[], dict[str, Any]] | None = None
+    switch_backend: Callable[[str], Awaitable[dict[str, Any]]] | None = None
 
 
 class ToolSpec(TypedDict):

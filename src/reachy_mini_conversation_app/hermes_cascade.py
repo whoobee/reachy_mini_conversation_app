@@ -15,6 +15,7 @@ import sys
 import json
 import math
 import time
+import wave
 import types
 import base64
 import asyncio
@@ -30,7 +31,12 @@ from mcp import types as mcp_types
 from numpy.typing import NDArray
 from websockets.asyncio.client import ClientConnection, connect
 
-from reachy_mini_conversation_app.config import config, set_custom_profile
+from reachy_mini_conversation_app.alarms import TOOL_DEFINITIONS as ALARM_TOOLS
+from reachy_mini_conversation_app.alarms import Alarm, AlarmClock, chime
+from reachy_mini_conversation_app.config import config, persist_env_value, set_custom_profile
+from reachy_mini_conversation_app.weather import TOOL_SCHEMA as WEATHER_SCHEMA
+from reachy_mini_conversation_app.weather import TOOL_DESCRIPTION as WEATHER_DESCRIPTION
+from reachy_mini_conversation_app.weather import WeatherService
 from reachy_mini_conversation_app.robot_mcp import RobotMcpServer, parse_tool_names
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
 from reachy_mini_conversation_app.elevenlabs_api import (
@@ -42,7 +48,7 @@ from reachy_mini_conversation_app.elevenlabs_api import (
     elevenlabs_http_client,
     raise_for_elevenlabs_status,
 )
-from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
+from reachy_mini_conversation_app.tools.core_tools import ToolDependencies, get_tool_specs, dispatch_tool_call
 from reachy_mini_conversation_app.conversation_handler import QueueItem, AudioFrame, ConversationHandler
 from reachy_mini_conversation_app.tools.background_tool_manager import ToolNotification, BackgroundToolManager
 
@@ -57,6 +63,9 @@ _BARGE_IN_MIN_WORDS: Final[int] = 2
 _ECHO_WORD_OVERLAP: Final[float] = 0.6
 _MIN_SENTENCE_CHARS: Final[int] = 12
 _MONITOR_INTERVAL_S: Final[float] = 0.2
+_WAKE_CLIP_SAMPLES: Final[int] = SAMPLE_RATE * 5 // 2  # 2.5 s of audio before a wake
+_WAKE_CLIPS_KEPT: Final[int] = 200
+LISTEN_TIME_RANGE_S: Final[tuple[int, int]] = (1, 30)
 _FILLER_ONLY = re.compile(
     r"^(?:[\W_]*(?:ă+m*|â+|a{2,}|e{2,}m*|m{2,}|hm+|mhm|eh+|ah+|uh+m*|um+))+[\W_]*$", re.IGNORECASE | re.UNICODE
 )
@@ -107,12 +116,16 @@ def wake_phrase() -> str:
 
 
 def strip_wake_phrase(text: str, wake_word: str) -> str:
-    """Remove the wake phrase (e.g. "Hey, Jarvis!") from a transcript."""
-    words = [w for w in re.split(r"[-_\s]+", wake_word.strip()) if w]
-    if not words:
-        return text.strip()
-    pattern = r"\b" + r"[\W_]*".join(re.escape(w) for w in words) + r"\b[\W_]*"
-    return re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+    """Remove the wake phrase (e.g. "Hey, Jarvis!") from a transcript.
+
+    ``wake_word`` may list several spellings separated by ``|`` (e.g. "hey reachy|hei richie").
+    """
+    for phrase in wake_word.split("|"):
+        words = [w for w in re.split(r"[-_\s]+", phrase.strip()) if w]
+        if words:
+            pattern = r"\b" + r"[\W_]*".join(re.escape(w) for w in words) + r"\b[\W_]*"
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+    return text.strip()
 
 
 def is_filler_only(text: str) -> bool:
@@ -162,8 +175,11 @@ def to_mono_16k(frame: AudioFrame) -> NDArray[np.int16]:
 class WakeWordDetector:
     """openWakeWord model fed with 16 kHz int16 audio."""
 
-    def __init__(self, model: str, threshold: float) -> None:
-        """Load a pretrained model by name (downloaded on first use) or a model file path."""
+    def __init__(self, model: str, threshold: float, vad_threshold: float = 0.0) -> None:
+        """Load a pretrained model by name (downloaded on first use) or a model file path.
+
+        With ``vad_threshold`` > 0, frames without detected speech (Silero VAD) never trigger.
+        """
         from openwakeword.model import Model
         from openwakeword.utils import download_models
 
@@ -172,22 +188,23 @@ class WakeWordDetector:
         else:
             download_models([model])
             model_ref = model
-        self._model = Model(wakeword_models=[model_ref], inference_framework="onnx")
+        self._model = Model(wakeword_models=[model_ref], inference_framework="onnx", vad_threshold=vad_threshold)
         self._threshold = threshold
         self._buffer = np.zeros(0, dtype=np.int16)
+        self.last_score = 0.0
 
     def process(self, pcm: NDArray[np.int16]) -> bool:
-        """Feed audio; return True when the wake word was detected."""
+        """Feed audio; return True when the wake word was detected (score kept in ``last_score``)."""
         self._buffer = np.concatenate([self._buffer, pcm])
-        detected = False
+        peak = 0.0
         while self._buffer.size >= _WAKE_FRAME_SAMPLES:
             frame, self._buffer = self._buffer[:_WAKE_FRAME_SAMPLES], self._buffer[_WAKE_FRAME_SAMPLES:]
-            scores = self._model.predict(frame)
-            if max(scores.values(), default=0.0) >= self._threshold:
-                detected = True
-        if detected:
-            self.reset()
-        return detected
+            peak = max(peak, float(max(self._model.predict(frame).values(), default=0.0)))
+        if peak < self._threshold:
+            return False
+        self.reset()
+        self.last_score = peak
+        return True
 
     def reset(self) -> None:
         """Clear buffered audio and model state."""
@@ -266,11 +283,28 @@ class EdgeImpulseDetector:
         self._runner.stop()
 
 
-def make_wake_word_detector(model: str, threshold: float) -> WakeWordDetector | EdgeImpulseDetector:
+def make_wake_word_detector(
+    model: str, threshold: float, vad_threshold: float = 0.0
+) -> WakeWordDetector | EdgeImpulseDetector:
     """Return an Edge Impulse detector for ``.eim`` files, otherwise openWakeWord."""
     if Path(model).suffix == ".eim":
         return EdgeImpulseDetector(model, threshold)
-    return WakeWordDetector(model, threshold)
+    return WakeWordDetector(model, threshold, vad_threshold)
+
+
+def save_wake_clip(directory: Path, audio: NDArray[np.int16], score: float, keep: int = _WAKE_CLIPS_KEPT) -> Path:
+    """Save the audio that triggered a wake (for reviewing false wakes) and prune old clips."""
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    path = directory / f"wake_{stamp}_{score:.2f}.wav"
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(SAMPLE_RATE)
+        out.writeframes(audio.tobytes())
+    for old in sorted(directory.glob("wake_*.wav"))[:-keep]:
+        old.unlink(missing_ok=True)
+    return path
 
 
 class HermesCascadeHandler(ConversationHandler):
@@ -303,6 +337,9 @@ class HermesCascadeHandler(ConversationHandler):
         self._stopped = asyncio.Event()
         self._robot_mcp: RobotMcpServer | None = None
         self._sleep_requested = False
+        alarm_root = Path(instance_path) if instance_path else Path.home() / ".cache" / "reachy_mini_conversation_app"
+        self._alarm_clock = AlarmClock(alarm_root / "alarms.json", config.ALARM_TIMEZONE)
+        self._weather = WeatherService(config.WEATHER_LOCATION)
         self._robot_mcp_task: asyncio.Task[None] | None = None
 
         # Conversation state
@@ -311,6 +348,7 @@ class HermesCascadeHandler(ConversationHandler):
         self._stt_ws: ClientConnection | None = None
         self._stt_task: asyncio.Task[None] | None = None
         self._pending_audio: list[NDArray[np.int16]] = []
+        self._recent_audio = np.zeros(0, dtype=np.int16)
         self._send_buffer = np.zeros(0, dtype=np.int16)
         self._response_task: asyncio.Task[None] | None = None
         self._spoken_text = ""
@@ -328,6 +366,10 @@ class HermesCascadeHandler(ConversationHandler):
     def _idle_behavior_ready(self) -> bool:
         """Only run idle behaviors while waiting for the wake word."""
         return not self._active and not self._speaking
+
+    def is_busy(self) -> bool:
+        """Busy from the wake word until the conversation closes, and while speaking (e.g. an alarm)."""
+        return self._active or self._is_busy()
 
     async def start_up(self) -> None:
         """Connect clients, load the wake word model, then supervise conversations until shutdown."""
@@ -350,7 +392,9 @@ class HermesCascadeHandler(ConversationHandler):
             if not self._voice_ids_by_name:
                 raise RuntimeError("Set ELEVENLABS_VOICE_ID: no ElevenLabs voice is available")
             self._voice_id = next(iter(self._voice_ids_by_name.values()))
-        self._detector = await asyncio.to_thread(make_wake_word_detector, config.WAKE_WORD, config.WAKE_WORD_THRESHOLD)
+        self._detector = await asyncio.to_thread(
+            make_wake_word_detector, config.WAKE_WORD, config.WAKE_WORD_THRESHOLD, config.WAKE_WORD_VAD_THRESHOLD
+        )
         await self._cache_ack()
         self.tool_manager.start_up(tool_callbacks=[self._on_tool_done])
         self._start_robot_mcp()
@@ -377,6 +421,8 @@ class HermesCascadeHandler(ConversationHandler):
 
     async def _supervise(self) -> None:
         """Track playback end, run a requested sleep, and close conversations after the silence timeout."""
+        for alarm in self._alarm_clock.pop_due():
+            asyncio.create_task(self._ring(alarm), name=f"alarm-{alarm.id}")
         now = time.monotonic()
         if self._sleep_requested and not self._is_generating() and now >= self._playback_until:
             self._sleep_requested = False
@@ -390,7 +436,7 @@ class HermesCascadeHandler(ConversationHandler):
                 self.deps.movement_manager.set_listening(True)
         if self._active and not self._is_generating() and not self._speaking:
             quiet_since = max(self._last_user_activity, self._playback_until)
-            if now - quiet_since > config.CONVERSATION_TIMEOUT_S:
+            if now - quiet_since > self._listen_time():
                 await self._end_conversation("silence timeout")
 
     def _start_robot_mcp(self) -> None:
@@ -408,13 +454,31 @@ class HermesCascadeHandler(ConversationHandler):
             ),
             inputSchema={"type": "object", "properties": {}},
         )
+        low, high = LISTEN_TIME_RANGE_S
+        listen_tool = mcp_types.Tool(
+            name="set_listening_time",
+            description=(
+                f"Set how many seconds ({low}-{high}) Reachy keeps listening without the wake word after "
+                "'Hei Reachy' and after each of its answers, before waiting for the wake word again. "
+                "Omit seconds to read the current value."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {"seconds": {"type": "integer", "minimum": low, "maximum": high}},
+            },
+        )
         self._robot_mcp = RobotMcpServer(
             self.deps,
             parse_tool_names(config.ROBOT_MCP_TOOLS),
             config.ROBOT_MCP_HOST,
             config.ROBOT_MCP_PORT,
             token,
-            extra_tools={"go_to_sleep": (sleep_tool, self._request_sleep)},
+            extra_tools={
+                "go_to_sleep": (sleep_tool, self._request_sleep),
+                "set_listening_time": (listen_tool, self._set_listening_time),
+                **self._alarm_tools(),
+                **self._internet_tools(),
+            },
         )
         self._robot_mcp_task = asyncio.create_task(self._robot_mcp.serve(), name="robot-mcp")
 
@@ -449,6 +513,85 @@ class HermesCascadeHandler(ConversationHandler):
         if completed_tool.error is not None:
             logger.warning("Idle tool '%s' failed: %s", completed_tool.tool_name, completed_tool.error)
 
+    # ---- listening time ----
+
+    @staticmethod
+    def _listen_time() -> float:
+        """Seconds of silence before going back to wake-word mode, kept within the allowed range."""
+        low, high = LISTEN_TIME_RANGE_S
+        return float(min(max(config.CONVERSATION_TIMEOUT_S, low), high))
+
+    async def _set_listening_time(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Read or change the listening window, persisting it to the instance .env."""
+        low, high = LISTEN_TIME_RANGE_S
+        if arguments.get("seconds") is None:
+            return {"listening_time_seconds": self._listen_time(), "allowed_range": [low, high]}
+        try:
+            seconds = int(round(float(arguments["seconds"])))
+        except (TypeError, ValueError):
+            return {"error": f"seconds must be a number between {low} and {high}"}
+        if not low <= seconds <= high:
+            return {
+                "error": f"seconds must be between {low} and {high}",
+                "listening_time_seconds": self._listen_time(),
+            }
+        previous = self._listen_time()
+        config.CONVERSATION_TIMEOUT_S = float(seconds)
+        if self.instance_path:
+            persist_env_value(Path(self.instance_path) / ".env", "CONVERSATION_TIMEOUT_S", str(seconds))
+        logger.info("Listening time changed from %.0f s to %d s", previous, seconds)
+        return {"status": "listening time changed", "previous_seconds": previous, "listening_time_seconds": seconds}
+
+    # ---- alarms and internet tools ----
+
+    def _alarm_tools(self) -> dict[str, tuple[mcp_types.Tool, Any]]:
+        handlers = {
+            "set_timer": self._alarm_clock.set_timer,
+            "set_alarm": self._alarm_clock.set_alarm,
+            "list_alarms": self._alarm_clock.list_alarms,
+            "cancel_alarm": self._alarm_clock.cancel_alarm,
+        }
+        return {
+            name: (mcp_types.Tool(name=name, description=description, inputSchema=schema), handlers[name])
+            for name, (description, schema) in ALARM_TOOLS.items()
+        }
+
+    def _internet_tools(self) -> dict[str, tuple[mcp_types.Tool, Any]]:
+        """Offer the weather forecast plus the app's remote web/time tools to Hermes under short names."""
+        specs = {spec["name"]: spec for spec in get_tool_specs()}
+        tools: dict[str, tuple[mcp_types.Tool, Any]] = {
+            "get_weather": (
+                mcp_types.Tool(name="get_weather", description=WEATHER_DESCRIPTION, inputSchema=WEATHER_SCHEMA),
+                self._weather.forecast,
+            )
+        }
+        for short in ("web_search", "get_time"):
+            suffix = "search_web" if short == "web_search" else short
+            full = next((name for name in specs if name.endswith(f"__{suffix}")), None)
+            if full is None:
+                continue
+
+            async def run(arguments: dict[str, Any], tool_name: str = full) -> dict[str, Any]:
+                return await dispatch_tool_call(tool_name, json.dumps(arguments), self.deps)
+
+            spec = specs[full]
+            tools[short] = (
+                mcp_types.Tool(name=short, description=spec["description"], inputSchema=spec["parameters"]),
+                run,
+            )
+        return tools
+
+    async def _ring(self, alarm: Alarm) -> None:
+        """Chime and announce a due timer or alarm, even outside a conversation."""
+        logger.info("Ringing %s %s (%s)", alarm.kind, alarm.id, alarm.label or "no label")
+        self._mark_activity("alarm")
+        try:
+            await self._play(chime(SAMPLE_RATE))
+            if self._tts_http is not None:
+                await self._speak(self._alarm_clock.announcement(alarm))
+        except Exception as e:
+            logger.error("Alarm %s could not be announced: %s", alarm.id, e)
+
     # ---- sleep ----
 
     async def _request_sleep(self, _arguments: dict[str, Any]) -> dict[str, Any]:
@@ -477,7 +620,9 @@ class HermesCascadeHandler(ConversationHandler):
             return
         pcm = to_mono_16k(frame)
         if not self._active:
+            self._recent_audio = np.concatenate([self._recent_audio, pcm])[-_WAKE_CLIP_SAMPLES:]
             if self._detector is not None and self._detector.process(pcm):
+                self._save_wake_clip()
                 await self._wake()
             return
         if self._stt_ws is None:
@@ -489,6 +634,20 @@ class HermesCascadeHandler(ConversationHandler):
         if self._send_buffer.size >= _STT_CHUNK_SAMPLES:
             chunk, self._send_buffer = self._send_buffer, np.zeros(0, dtype=np.int16)
             await self._send_audio(chunk)
+
+    def _save_wake_clip(self) -> None:
+        """Keep the audio and score of each wake so false wakes can be reviewed and trained away."""
+        score = float(getattr(self._detector, "last_score", 0.0))
+        logger.info("Wake word score %.2f", score)
+        if not config.WAKE_WORD_SAVE_CLIPS:
+            return
+        root = (
+            Path(self.instance_path) if self.instance_path else Path.home() / ".cache" / "reachy_mini_conversation_app"
+        )
+        try:
+            save_wake_clip(root / "wake_clips", self._recent_audio, score)
+        except OSError as e:
+            logger.debug("Could not save wake clip: %s", e)
 
     async def _send_audio(self, pcm: NDArray[np.int16]) -> None:
         ws = self._stt_ws

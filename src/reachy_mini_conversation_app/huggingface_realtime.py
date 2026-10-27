@@ -252,6 +252,10 @@ class HuggingFaceRealtimeHandler(ConversationHandler):
         """Hold idle behavior while a model response is still active."""
         return self._response_done_event.is_set()
 
+    def is_busy(self) -> bool:
+        """Busy while a model response is active."""
+        return not self._response_done_event.is_set()
+
     async def _cancel_partial_transcript_task(self) -> None:
         if self.partial_transcript_task and not self.partial_transcript_task.done():
             self.partial_transcript_task.cancel()
