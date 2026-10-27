@@ -1,0 +1,51 @@
+model:
+  default: deepseek/deepseek-v4.1-flash-1017
+  provider: nous
+custom_providers:
+  - name: local-llm
+    base_url: http://127.0.0.1:11434/v1
+    model: qwen3.5-reachy
+    models:
+      qwen3.5-reachy:
+        context_length: 65536
+fallback_providers:
+  - provider: custom:local-llm
+    model: qwen3.5-reachy
+plugins:
+  enabled:
+    - homeassistant
+  disabled: []
+agent:
+  max_turns: 12
+  reasoning_effort: minimal
+  disabled_toolsets: []
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+platform_toolsets:
+  api_server:
+    - connections
+    - homeassistant
+    - memory
+gateway:
+  api_server:
+    enabled: true
+    host: 0.0.0.0
+    port: 8643
+streaming:
+  enabled: true
+auxiliary:
+  title_generation:
+    enabled: false
+    reasoning_effort: none
+  compression:
+    reasoning_effort: none
+mcp_servers:
+  reachy_robot:
+    url: http://<ROBOT_IP>:8766/mcp
+    headers:
+      Authorization: "Bearer ${ROBOT_MCP_TOKEN}"
+    timeout: 30
+tools:
+  tool_search:
+    enabled: "off"
