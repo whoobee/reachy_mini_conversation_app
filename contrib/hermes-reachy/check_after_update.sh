@@ -13,10 +13,15 @@ echo "   GET /p/reachy/v1/models -> $code"; [ "$code" = "200" ] || ok=1
 
 echo "2) Tools on the API server:"
 tools=$(reachy tools list --platform api_server 2>&1)
-for needed in homeassistant memory reachy_robot; do
+for needed in memory reachy_robot; do
   if echo "$tools" | grep -q "$needed"; then echo "   ✓ $needed"; else echo "   ✗ $needed MISSING"; ok=1; fi
 done
-reachy plugins list 2>&1 | grep -E "^│ homeassistant " | grep -q "enabled" || { echo "   ✗ homeassistant plugin not enabled (reachy plugins enable homeassistant)"; ok=1; }
+# Home Assistant must go only through the robot's gated tools (engineering mode), never the unrestricted plugin.
+if echo "$tools" | grep -qE "✓ enabled +homeassistant"; then
+  echo "   ✗ the unrestricted homeassistant toolset is enabled for reachy (remove it from platform_toolsets.api_server)"; ok=1
+else
+  echo "   ✓ no unrestricted homeassistant toolset"
+fi
 
 echo "3) Probe question (read-only):"
 answer=$(curl -s -m90 -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
@@ -24,7 +29,7 @@ answer=$(curl -s -m90 -H "Authorization: Bearer $KEY" -H "Content-Type: applicat
   -d '{"model":"reachy","messages":[{"role":"user","content":"Câte grade sunt în dormitor? Doar citește."}]}' \
   | python3 -c "import json,sys; print(json.load(sys.stdin)['choices'][0]['message']['content'][:200])" 2>&1)
 echo "   $answer"
-grep "tool ha_" "$PROFILE_DIR/logs/agent.log" | tail -1 | grep -q "$(date +%Y-%m-%d)" && echo "   ✓ Home Assistant tool used" || { echo "   ✗ no Home Assistant tool call today"; ok=1; }
+grep -E "tool mcp__reachy_robot__ha_" "$PROFILE_DIR/logs/agent.log" | tail -1 | grep -q "$(date +%Y-%m-%d)" && echo "   ✓ Home Assistant read through the robot gateway" || { echo "   ✗ no Home Assistant tool call today"; ok=1; }
 
 [ $ok -eq 0 ] && echo "ALL OK" || echo "SOMETHING NEEDS FIXING (see above)"
 exit $ok

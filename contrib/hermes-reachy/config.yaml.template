@@ -12,9 +12,9 @@ fallback_providers:
   - provider: custom:local-llm
     model: qwen3.5-reachy
 plugins:
-  enabled:
+  enabled: []
+  disabled:
     - homeassistant
-  disabled: []
 agent:
   max_turns: 12
   reasoning_effort: minimal
@@ -25,7 +25,6 @@ memory:
 platform_toolsets:
   api_server:
     - connections
-    - homeassistant
     - memory
 gateway:
   api_server:

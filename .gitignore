@@ -18,6 +18,7 @@ elevenlabs_agent_id
 alarms.json
 alarms.tmp
 wake_clips/
+news_feeds.json
 
 # Build and distribution
 build/

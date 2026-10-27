@@ -29,7 +29,11 @@ copy that is never pushed).
 4. Fill the profile `.env` from `profile.env.example`. `API_SERVER_KEY` and `ROBOT_MCP_TOKEN`
    are random strings (`python3 -c "import secrets; print(secrets.token_hex(32))"`) that must
    match `HERMES_API_KEY` and `ROBOT_MCP_TOKEN` in the robot app's `.env`.
-5. Enable Home Assistant for the profile: `reachy plugins enable homeassistant`.
+5. Home Assistant goes through the robot, not a Hermes plugin: run [ha-mcp](https://github.com/homeassistant-ai/ha-mcp)
+   (e.g. Docker `ghcr.io/homeassistant-ai/ha-mcp:8.7.0 ha-mcp-web` with `HOMEASSISTANT_URL`, an admin
+   `HOMEASSISTANT_TOKEN` and a random `MCP_SECRET_PATH`) and set `HA_MCP_URL` in the robot app's `.env`.
+   Keep `homeassistant` **out** of this profile's toolsets: Hermes' plugin can call any service and would
+   bypass engineering mode. Your main Hermes profile can use ha-mcp directly with full access.
 6. Optional local fallback model: `ollama create qwen3.5-reachy -f Modelfile.qwen3.5-reachy`
    (Hermes requires at least 64K context; `num_gpu 99` keeps it fully on the GPU).
 7. Restart the shared gateway: `hermes -p default gateway restart`.
@@ -41,6 +45,15 @@ copy that is never pushed).
    ROBOT_MCP_TOKEN=<ROBOT_MCP_TOKEN from step 4>
    ```
 9. Run `./check_after_update.sh` on the Hermes host; it should end with `ALL OK`.
+
+## Home Assistant permissions
+
+- Always allowed: reads (states, logs, traces, history, config) and device control in safe domains
+  (lights, switches, covers, fans, climate, media, scenes), except protected entities
+  (`HA_PROTECTED_PATTERN`, default `valve|lock|alarm|garage|siren|heater|pump`).
+- Everything else (automations, scripts, helpers, entities, restarts...) needs **engineering mode**:
+  `set_engineering_mode` by voice, switching off by itself after `ENGINEERING_MODE_TIMEOUT_MIN`.
+  The personality asks for a clear "da" before every change.
 
 ## Notes and gotchas
 

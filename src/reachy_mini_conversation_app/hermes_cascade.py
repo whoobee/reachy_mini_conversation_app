@@ -31,12 +31,16 @@ from mcp import types as mcp_types
 from numpy.typing import NDArray
 from websockets.asyncio.client import ClientConnection, connect
 
+from reachy_mini_conversation_app.news import TOOL_DEFINITIONS as NEWS_TOOLS
+from reachy_mini_conversation_app.news import NewsService
 from reachy_mini_conversation_app.alarms import TOOL_DEFINITIONS as ALARM_TOOLS
 from reachy_mini_conversation_app.alarms import Alarm, AlarmClock, chime
 from reachy_mini_conversation_app.config import config, persist_env_value, set_custom_profile
 from reachy_mini_conversation_app.weather import TOOL_SCHEMA as WEATHER_SCHEMA
 from reachy_mini_conversation_app.weather import TOOL_DESCRIPTION as WEATHER_DESCRIPTION
 from reachy_mini_conversation_app.weather import WeatherService
+from reachy_mini_conversation_app.ha_admin import TOOL_DEFINITIONS as HA_ADMIN_TOOLS
+from reachy_mini_conversation_app.ha_admin import HaAdmin, EngineeringMode
 from reachy_mini_conversation_app.robot_mcp import RobotMcpServer, parse_tool_names
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
 from reachy_mini_conversation_app.elevenlabs_api import (
@@ -340,6 +344,11 @@ class HermesCascadeHandler(ConversationHandler):
         alarm_root = Path(instance_path) if instance_path else Path.home() / ".cache" / "reachy_mini_conversation_app"
         self._alarm_clock = AlarmClock(alarm_root / "alarms.json", config.ALARM_TIMEZONE)
         self._weather = WeatherService(config.WEATHER_LOCATION)
+        news_path = Path(config.NEWS_FEEDS_FILE) if config.NEWS_FEEDS_FILE else alarm_root / "news_feeds.json"
+        self._news = NewsService(news_path, timezone=self._alarm_clock.tz)
+        self._engineering = EngineeringMode(config.ENGINEERING_MODE_TIMEOUT_MIN)
+        ha_mcp_url = (config.HA_MCP_URL or "").strip()
+        self._ha_admin = HaAdmin(ha_mcp_url, self._engineering, config.HA_PROTECTED_PATTERN) if ha_mcp_url else None
         self._robot_mcp_task: asyncio.Task[None] | None = None
 
         # Conversation state
@@ -423,6 +432,10 @@ class HermesCascadeHandler(ConversationHandler):
         """Track playback end, run a requested sleep, and close conversations after the silence timeout."""
         for alarm in self._alarm_clock.pop_due():
             asyncio.create_task(self._ring(alarm), name=f"alarm-{alarm.id}")
+        if self._engineering.expired_since_check():
+            logger.info("Engineering mode timed out")
+            if self._tts_http is not None:
+                asyncio.create_task(self._speak("Modul inginer s-a închis."), name="engineering-mode-off")
         now = time.monotonic()
         if self._sleep_requested and not self._is_generating() and now >= self._playback_until:
             self._sleep_requested = False
@@ -477,15 +490,21 @@ class HermesCascadeHandler(ConversationHandler):
                 "go_to_sleep": (sleep_tool, self._request_sleep),
                 "set_listening_time": (listen_tool, self._set_listening_time),
                 **self._alarm_tools(),
+                **self._news_tools(),
+                **self._ha_admin_tools(),
                 **self._internet_tools(),
             },
         )
         self._robot_mcp_task = asyncio.create_task(self._robot_mcp.serve(), name="robot-mcp")
+        if self._ha_admin is not None:
+            asyncio.create_task(self._warm_ha_admin(), name="ha-admin-warmup")
 
     async def shutdown(self) -> None:
         """Stop the loop and close all connections."""
         self._stopped.set()
         await self._end_conversation("shutdown")
+        if self._ha_admin is not None:
+            await self._ha_admin.close()
         if self._robot_mcp is not None:
             await self._robot_mcp.stop()
             if self._robot_mcp_task is not None:
@@ -554,6 +573,43 @@ class HermesCascadeHandler(ConversationHandler):
         return {
             name: (mcp_types.Tool(name=name, description=description, inputSchema=schema), handlers[name])
             for name, (description, schema) in ALARM_TOOLS.items()
+        }
+
+    async def _warm_ha_admin(self) -> None:
+        """Open the ha-mcp sessions and load its tool list so the first voice request is fast."""
+        assert self._ha_admin is not None
+        try:
+            await self._ha_admin.find_tools({"query": "state"})
+        except Exception as e:
+            logger.warning("ha-mcp is not reachable yet: %s", e)
+
+    def _ha_admin_tools(self) -> dict[str, tuple[mcp_types.Tool, Any]]:
+        if self._ha_admin is None:
+            return {}
+        handlers = {
+            "ha_find_tools": self._ha_admin.find_tools,
+            "ha_describe_tool": self._ha_admin.describe_tool,
+            "ha_run_tool": self._ha_admin.run_tool,
+            "set_engineering_mode": self._ha_admin.engineering_mode,
+            "ha_call_service": self._ha_admin.call_service,
+            "ha_get_state": self._ha_admin.get_state,
+            "ha_list_entities": self._ha_admin.list_entities,
+        }
+        return {
+            name: (mcp_types.Tool(name=name, description=description, inputSchema=schema), handlers[name])
+            for name, (description, schema) in HA_ADMIN_TOOLS.items()
+        }
+
+    def _news_tools(self) -> dict[str, tuple[mcp_types.Tool, Any]]:
+        handlers = {
+            "get_news": self._news.get_news,
+            "list_news_sources": self._news.list_sources,
+            "add_news_source": self._news.add_source,
+            "remove_news_source": self._news.remove_source,
+        }
+        return {
+            name: (mcp_types.Tool(name=name, description=description, inputSchema=schema), handlers[name])
+            for name, (description, schema) in NEWS_TOOLS.items()
         }
 
     def _internet_tools(self) -> dict[str, tuple[mcp_types.Tool, Any]]:
