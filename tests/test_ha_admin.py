@@ -188,3 +188,51 @@ async def test_session_is_reused_and_reopened_after_a_dropped_connection(monkeyp
 
 async def _noop() -> None:
     return None
+
+
+@pytest.mark.asyncio
+async def test_activity_keeps_engineering_mode_on_and_inactivity_ends_it(monkeypatch: Any) -> None:
+    """Each tool call restarts the timeout; it ends only after a full period without activity."""
+    admin, clock = _admin(monkeypatch, [])
+    await admin.engineering_mode({"enabled": True, "minutes": 10})
+
+    for _ in range(3):  # 3 x 8 minutes of work: longer than 10 minutes, but never 10 minutes idle
+        clock.now += 8 * 60
+        assert (await admin.run_tool({"name": "ha_get_logs"}))["kind"] == "read"
+        assert admin.mode.active
+    assert admin.mode.seconds_left() == 600
+
+    clock.now += 601
+    assert not admin.mode.active and admin.mode.expired_since_check() is True
+
+
+def test_touch_never_turns_engineering_mode_on() -> None:
+    """Activity while the mode is off does nothing."""
+    clock = _Clock()
+    mode = EngineeringMode(15, clock=clock)
+    mode.touch()
+    assert not mode.active and mode.seconds_left() == 0
+
+
+@pytest.mark.asyncio
+async def test_user_speech_restarts_the_engineering_timer() -> None:
+    """A committed utterance in a Hermes conversation counts as activity."""
+    from unittest.mock import MagicMock
+
+    from reachy_mini_conversation_app.hermes_cascade import HermesCascadeHandler
+    from reachy_mini_conversation_app.tools.core_tools import ToolDependencies
+
+    handler = HermesCascadeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+    clock = _Clock()
+    handler._engineering = EngineeringMode(5, clock=clock)
+    handler._engineering.enable()
+    handler._hermes_http = MagicMock()
+    clock.now += 4 * 60
+
+    async def no_reply(text: str) -> None:
+        return None
+
+    handler._respond = no_reply  # type: ignore[method-assign]
+    await handler._handle_stt_message({"message_type": "committed_transcript", "text": "verifică automatizarea"})
+
+    assert handler._engineering.seconds_left() == 5 * 60

@@ -303,3 +303,11 @@ async def test_wake_saves_the_triggering_audio(monkeypatch: Any, tmp_path: Any) 
     clips = list((tmp_path / "wake_clips").glob("wake_*_0.93.wav"))
     assert len(clips) == 1
     handler._wake.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+def test_waiting_for_the_user_is_not_busy_but_thinking_and_speaking_are() -> None:
+    """An open conversation that is only listening does not block idle gestures; replies do."""
+    handler = _handler()  # active conversation, nothing generating or playing
+    assert not handler.is_busy()
+    handler._speaking = True
+    assert handler.is_busy()

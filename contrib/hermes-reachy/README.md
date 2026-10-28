@@ -69,5 +69,16 @@ copy that is never pushed).
   `/p/<profile>/` on port 8642 (no separate port or service per profile), and Home Assistant
   moved into the `homeassistant` plugin, which must be enabled per profile. Both broke this
   profile once; `check_after_update.sh` catches them.
+- **Robot asleep:** the app's MCP server stops while Reachy sleeps, and Hermes then retries only
+  every 5 minutes. Run the relay on the robot so the port never goes away (see `.env.example`):
+  ```
+  # ~/.config/systemd/user/reachy-mcp-relay.service
+  [Service]
+  ExecStart=<venv>/bin/python -m reachy_mini_conversation_app.robot_mcp_relay --env <app>/.env
+  Restart=always
+  [Install]
+  WantedBy=default.target
+  ```
+  then `systemctl --user enable --now reachy-mcp-relay` (and `loginctl enable-linger` so it runs without a login).
 - After changing the robot's MCP tools (a new app version), restart both the robot app and the
   shared gateway so Hermes rediscovers them.

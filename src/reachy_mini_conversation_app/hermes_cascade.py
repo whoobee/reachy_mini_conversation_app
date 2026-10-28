@@ -377,8 +377,8 @@ class HermesCascadeHandler(ConversationHandler):
         return not self._active and not self._speaking
 
     def is_busy(self) -> bool:
-        """Busy from the wake word until the conversation closes, and while speaking (e.g. an alarm)."""
-        return self._active or self._is_busy()
+        """Busy while thinking or speaking (incl. alarms); merely waiting for the user is not busy."""
+        return self._is_busy()
 
     async def start_up(self) -> None:
         """Connect clients, load the wake word model, then supervise conversations until shutdown."""
@@ -820,6 +820,7 @@ class HermesCascadeHandler(ConversationHandler):
                 return
             self._last_user_activity = time.monotonic()
             self._mark_activity("user_transcription_completed")
+            self._engineering.touch()  # active work keeps engineering mode on
             await self.output_queue.put(AdditionalOutputs({"role": "user", "content": text}))
             self._emit_transcript("user", text, True)
             await self._cancel_response()

@@ -33,13 +33,18 @@ SEARCH_RESULTS: Final[int] = 8
 
 
 class EngineeringMode:
-    """Time-limited permission for Home Assistant changes."""
+    """Permission for Home Assistant changes that ends after a period of inactivity.
+
+    The timeout restarts on every ``touch`` (each user utterance and admin tool call), so the
+    mode stays on while someone is actively working and switches off once they stop.
+    """
 
     def __init__(self, default_minutes: float, clock: Callable[[], float] = time.monotonic) -> None:
         """Start disabled; ``default_minutes`` is used when enabling without a duration."""
         self.default_minutes = default_minutes
         self._clock = clock
         self._until = 0.0
+        self._timeout_s = 60 * default_minutes
 
     @property
     def active(self) -> bool:
@@ -51,8 +56,14 @@ class EngineeringMode:
         return max(0, round(self._until - self._clock()))
 
     def enable(self, minutes: float | None = None) -> None:
-        """Turn on for ``minutes`` (default timeout when None)."""
-        self._until = self._clock() + 60 * (minutes if minutes and minutes > 0 else self.default_minutes)
+        """Turn on with an inactivity timeout of ``minutes`` (default timeout when None)."""
+        self._timeout_s = 60 * (minutes if minutes and minutes > 0 else self.default_minutes)
+        self._until = self._clock() + self._timeout_s
+
+    def touch(self) -> None:
+        """Restart the inactivity timeout if the mode is on (never turns it on)."""
+        if self.active:
+            self._until = self._clock() + self._timeout_s
 
     def disable(self) -> None:
         """Turn off now."""
@@ -147,6 +158,7 @@ class HaAdmin:
 
     async def find_tools(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Search ha-mcp tools by keywords in their names and descriptions."""
+        self.mode.touch()
         await self._ensure_tools()
         words = [w for w in re.findall(r"\w+", str(arguments.get("query") or "").lower()) if len(w) > 2]
         scored = []
@@ -170,6 +182,7 @@ class HaAdmin:
 
     async def describe_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Return one tool's description and input schema."""
+        self.mode.touch()
         await self._ensure_tools()
         tool = self._tools.get(str(arguments.get("name") or ""))
         if tool is None:
@@ -178,6 +191,7 @@ class HaAdmin:
 
     async def run_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Run a tool: reads always (read-only endpoint), writes only in engineering mode."""
+        self.mode.touch()
         await self._ensure_tools()
         name = str(arguments.get("name") or "")
         if name not in self._tools:
@@ -220,6 +234,7 @@ class HaAdmin:
 
     async def call_service(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Device control: safe domains always, everything else only in engineering mode."""
+        self.mode.touch()
         domain = str(arguments.get("domain") or "").strip()
         service = str(arguments.get("service") or "").strip()
         data = arguments.get("data") or {}
@@ -344,7 +359,8 @@ TOOL_DEFINITIONS: Final[dict[str, tuple[str, dict[str, Any]]]] = {
     ),
     "set_engineering_mode": (
         "Turn Reachy's engineering mode on or off. While on, the Home Assistant write tools work; it switches "
-        "itself off after a timeout. Omit 'enabled' to read the current state.",
+        "itself off after the given minutes without activity (any request or tool use restarts the timer). "
+        "Omit 'enabled' to read the current state.",
         {
             "type": "object",
             "properties": {

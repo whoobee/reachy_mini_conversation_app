@@ -48,6 +48,42 @@ def parse_tool_names(value: str | None) -> tuple[str, ...]:
     return names or DEFAULT_ROBOT_MCP_TOOLS
 
 
+ListTools = Callable[[], Awaitable[list[types.Tool]]]
+CallTool = Callable[[str, dict[str, Any]], Awaitable[types.CallToolResult]]
+
+
+def build_mcp_app(name: str, token: str, list_tools: ListTools, call_tool: CallTool) -> Starlette:
+    """Build a bearer-token protected, stateless Streamable HTTP MCP app (served at any path)."""
+    server: Server[Any, Any] = Server(name)
+
+    # Register request handlers directly: the SDK's decorator helpers are untyped.
+    async def handle_list(_request: types.ListToolsRequest) -> types.ServerResult:
+        return types.ServerResult(types.ListToolsResult(tools=await list_tools()))
+
+    async def handle_call(request: types.CallToolRequest) -> types.ServerResult:
+        return types.ServerResult(await call_tool(request.params.name, dict(request.params.arguments or {})))
+
+    server.request_handlers[types.ListToolsRequest] = handle_list
+    server.request_handlers[types.CallToolRequest] = handle_call
+    session_manager = StreamableHTTPSessionManager(app=server, stateless=True, json_response=True)
+    expected = f"Bearer {token}"
+
+    async def handle(scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http":
+            supplied = dict(scope.get("headers") or []).get(b"authorization", b"").decode()
+            if not hmac.compare_digest(supplied, expected):
+                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
+                return
+        await session_manager.handle_request(scope, receive, send)
+
+    @asynccontextmanager
+    async def lifespan(_app: Starlette) -> AsyncIterator[None]:
+        async with session_manager.run():
+            yield
+
+    return Starlette(routes=[Mount("/", app=handle)], lifespan=lifespan)
+
+
 class RobotMcpServer:
     """Streamable-HTTP MCP server offering a fixed set of robot tools."""
 
@@ -95,41 +131,18 @@ class RobotMcpServer:
         result = await dispatch_tool_call(name, json.dumps(arguments), self._deps)
         return result if isinstance(result, dict) else {"result": result}
 
-    def _authorized(self, scope: Scope) -> bool:
-        headers = dict(scope.get("headers") or [])
-        supplied = headers.get(b"authorization", b"").decode()
-        return hmac.compare_digest(supplied, f"Bearer {self._token}")
-
     def build_app(self) -> Starlette:
         """Build the ASGI app serving MCP at any path (normally ``/mcp``)."""
-        server: Server[Any, Any] = Server("reachy-robot")
 
-        # Register request handlers directly: the SDK's decorator helpers are untyped.
-        async def list_tools(_request: types.ListToolsRequest) -> types.ServerResult:
-            return types.ServerResult(types.ListToolsResult(tools=self.tool_definitions()))
+        async def list_tools() -> list[types.Tool]:
+            return self.tool_definitions()
 
-        async def call_tool(request: types.CallToolRequest) -> types.ServerResult:
-            result = await self.call(request.params.name, dict(request.params.arguments or {}))
+        async def call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+            result = await self.call(name, arguments)
             content: list[types.ContentBlock] = [types.TextContent(type="text", text=json.dumps(result))]
-            return types.ServerResult(types.CallToolResult(content=content, isError="error" in result))
+            return types.CallToolResult(content=content, isError="error" in result)
 
-        server.request_handlers[types.ListToolsRequest] = list_tools
-        server.request_handlers[types.CallToolRequest] = call_tool
-
-        session_manager = StreamableHTTPSessionManager(app=server, stateless=True, json_response=True)
-
-        async def handle(scope: Scope, receive: Receive, send: Send) -> None:
-            if scope["type"] == "http" and not self._authorized(scope):
-                await JSONResponse({"error": "unauthorized"}, status_code=401)(scope, receive, send)
-                return
-            await session_manager.handle_request(scope, receive, send)
-
-        @asynccontextmanager
-        async def lifespan(_app: Starlette) -> AsyncIterator[None]:
-            async with session_manager.run():
-                yield
-
-        return Starlette(routes=[Mount("/", app=handle)], lifespan=lifespan)
+        return build_mcp_app("reachy-robot", self._token, list_tools, call_tool)
 
     async def serve(self) -> None:
         """Serve until ``stop`` is called."""
