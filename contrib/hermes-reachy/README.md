@@ -63,8 +63,13 @@ copy that is never pushed).
   took. Keep `reasoning_effort: minimal`.
 - `tools.tool_search.enabled: "off"` hands the robot tools to the model directly. Otherwise Hermes
   hides MCP tools behind `tool_describe`/`tool_call`, adding a round trip per action.
-- `auxiliary.title_generation.enabled: false`: with a single local Ollama slot, title generation
-  blocked every turn for 30 s.
+- `auxiliary.title_generation`: on with a cloud model. With only a local Ollama model, turn it off:
+  title generation then shares the single slot and blocked every turn for 30 s.
+- **History:** the app uses one Hermes session per day (`reachy-YYYY-MM-DD`) and sends robot events
+  (wake, sleep by antenna, alarms rung, ignored noise...) as a `[Reachy: ...]` line ahead of the next
+  message, so the Hermes session holds the full story. `model.context_length: 65536` makes Hermes
+  summarize a long day early instead of growing the prompt; `session_search` lets Reachy look up
+  earlier days.
 - **After `hermes update`:** since v0.22 the default gateway serves all profiles under
   `/p/<profile>/` on port 8642 (no separate port or service per profile), and Home Assistant
   moved into the `homeassistant` plugin, which must be enabled per profile. Both broke this

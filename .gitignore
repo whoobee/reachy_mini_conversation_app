@@ -16,6 +16,7 @@ env/
 elevenlabs_agent_id
 # Runtime state written by the Hermes backend
 alarms.json
+robot_events.json
 alarms.tmp
 wake_clips/
 news_feeds.json

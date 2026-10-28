@@ -387,10 +387,14 @@ def run(
     if runtime_config.ANTENNA_SLEEP_GESTURE:
         from reachy_mini_conversation_app.antenna_gesture import AntennaSleepGesture
 
+        def sleep_by_antenna() -> dict[str, Any]:
+            stream_manager.handler.note_event("a adormit prin apăsarea antenei")
+            return go_to_sleep_and_stop_app()
+
         antenna_gesture = AntennaSleepGesture(
             robot,
             movement_manager,
-            on_trigger=go_to_sleep_and_stop_app,
+            on_trigger=sleep_by_antenna,
             is_busy=lambda: stream_manager.handler.is_busy(),
             down_position_rad=runtime_config.ANTENNA_SLEEP_DOWN_RAD,
             hold_s=runtime_config.ANTENNA_SLEEP_HOLD_S,

@@ -1,6 +1,8 @@
 model:
   default: deepseek/deepseek-v4.1-flash-1017
   provider: nous
+  # one Hermes session per day: keep the window small so long days get summarized early
+  context_length: 65536
 custom_providers:
   - name: local-llm
     base_url: http://127.0.0.1:11434/v1
@@ -26,6 +28,7 @@ platform_toolsets:
   api_server:
     - connections
     - memory
+    - session_search
 gateway:
   api_server:
     enabled: true
@@ -35,7 +38,7 @@ streaming:
   enabled: true
 auxiliary:
   title_generation:
-    enabled: false
+    enabled: true
     reasoning_effort: none
   compression:
     reasoning_effort: none

@@ -3,7 +3,7 @@ from typing import Any
 
 import pytest
 
-from reachy_mini_conversation_app.ha_admin import HaAdmin, EngineeringMode
+from reachy_mini_conversation_app.ha_admin import TOOL_DEFINITIONS, HaAdmin, EngineeringMode
 
 
 class _Clock:
@@ -14,8 +14,10 @@ class _Clock:
         return self.now
 
 
-def _tool(name: str, description: str) -> SimpleNamespace:
-    return SimpleNamespace(name=name, description=description, inputSchema={"type": "object"})
+def _tool(name: str, description: str, required: tuple[str, ...] = ()) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name, description=description, inputSchema={"type": "object", "required": list(required)}
+    )
 
 
 FULL = [
@@ -23,6 +25,7 @@ FULL = [
     _tool("ha_get_automation_traces", "Get automation run traces."),
     _tool("ha_config_set_automation", "Create or update an automation."),
     _tool("ha_restart", "Restart Home Assistant."),
+    _tool("ha_remove_device", "Remove a device.", required=("device_id",)),
 ]
 READ_ONLY = FULL[:2]
 
@@ -160,37 +163,6 @@ def test_protected_pattern_is_configurable(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_is_reused_and_reopened_after_a_dropped_connection(monkeypatch: Any) -> None:
-    """One session per endpoint is kept open; a failed call reconnects once and retries."""
-    admin = HaAdmin("http://ha-mcp/x", EngineeringMode(15))
-    opened: list[str] = []
-    attempts = {"n": 0}
-
-    class _Session:
-        async def list_tools(self) -> Any:
-            attempts["n"] += 1
-            if attempts["n"] == 2:
-                raise ConnectionError("dropped")
-            return SimpleNamespace(tools=[])
-
-    async def fake_session(url: str) -> Any:
-        if url not in admin._sessions:
-            opened.append(url)
-            admin._sessions[url] = (SimpleNamespace(aclose=_noop), _Session())
-        return admin._sessions[url][1]
-
-    monkeypatch.setattr(admin, "_session", fake_session)
-    await admin._session_call("http://ha-mcp/x", "list_tools")
-    await admin._session_call("http://ha-mcp/x", "list_tools")  # first try fails, reconnects, retries
-
-    assert opened == ["http://ha-mcp/x", "http://ha-mcp/x"] and attempts["n"] == 3
-
-
-async def _noop() -> None:
-    return None
-
-
-@pytest.mark.asyncio
 async def test_activity_keeps_engineering_mode_on_and_inactivity_ends_it(monkeypatch: Any) -> None:
     """Each tool call restarts the timeout; it ends only after a full period without activity."""
     admin, clock = _admin(monkeypatch, [])
@@ -236,3 +208,26 @@ async def test_user_speech_restarts_the_engineering_timer() -> None:
     await handler._handle_stt_message({"message_type": "committed_transcript", "text": "verifică automatizarea"})
 
     assert handler._engineering.seconds_left() == 5 * 60
+
+
+@pytest.mark.asyncio
+async def test_arguments_come_as_a_json_string_and_required_ones_are_checked(monkeypatch: Any) -> None:
+    """The model passes arguments as a JSON string; a call missing required ones is refused, not run."""
+    calls: list[tuple[str, str, tuple[Any, ...]]] = []
+    admin, _ = _admin(monkeypatch, calls)
+    await admin.engineering_mode({"enabled": True})
+
+    refused = await admin.run_tool({"name": "ha_remove_device", "arguments": "{}"})
+    assert "missing required arguments: device_id" in refused["error"]
+    assert not [c for c in calls if c[1] == "call_tool"]
+
+    done = await admin.run_tool({"name": "ha_remove_device", "arguments": '{"device_id": "abc"}'})
+    assert done["kind"] == "write"
+    assert calls[-1][2] == ("ha_remove_device", {"device_id": "abc"})
+
+
+def test_run_tool_schema_survives_hermes_schema_sanitizer() -> None:
+    """A property-less object would be rewritten to "no fields allowed"; the arguments field is a string."""
+    schema = TOOL_DEFINITIONS["ha_run_tool"][1]
+    assert schema["properties"]["arguments"]["type"] == "string"
+    assert TOOL_DEFINITIONS["ha_call_service"][1]["properties"]["data"]["type"] == "string"

@@ -77,6 +77,9 @@ class ConversationHandler(AsyncStreamHandler, ABC):
         """Return True while a conversation turn is in progress (listening, thinking or speaking)."""
         return False
 
+    def note_event(self, text: str) -> None:
+        """Record a robot event (e.g. sleep by antenna) for the agent's history. No-op by default."""
+
     async def emit(self) -> HandlerOutput:
         """Emit the next queued output, triggering local idle behavior when due."""
         now = time.monotonic()

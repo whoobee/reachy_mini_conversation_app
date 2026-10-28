@@ -14,18 +14,17 @@ Run: ``python -m reachy_mini_conversation_app.robot_mcp_relay --env /path/to/app
 
 from __future__ import annotations
 import json
-import asyncio
 import logging
 import argparse
 from typing import Any, Final
 from pathlib import Path
-from contextlib import AsyncExitStack
 
 import uvicorn
 from mcp import types
 from dotenv import dotenv_values
 
 from reachy_mini_conversation_app.robot_mcp import build_mcp_app
+from reachy_mini_conversation_app.persistent_mcp import PersistentMcpClient
 
 
 logger = logging.getLogger(__name__)
@@ -41,12 +40,8 @@ class RobotMcpRelay:
 
     def __init__(self, upstream_url: str, token: str, cache_path: Path) -> None:
         """Relay to ``upstream_url`` (the app's MCP endpoint), authenticating with ``token``."""
-        self._upstream_url = upstream_url
-        self._token = token
+        self._upstream = PersistentMcpClient(upstream_url, headers={"Authorization": f"Bearer {token}"})
         self._cache_path = cache_path
-        self._stack: AsyncExitStack | None = None
-        self._session: Any = None
-        self._lock = asyncio.Lock()
         self._cached_tools = self._load_cache()
 
     def _load_cache(self) -> list[types.Tool]:
@@ -63,44 +58,9 @@ class RobotMcpRelay:
         except OSError as e:
             logger.warning("Could not save the tool list cache: %s", e)
 
-    async def _upstream(self) -> Any:
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        if self._session is None:
-            stack = AsyncExitStack()
-            try:
-                headers = {"Authorization": f"Bearer {self._token}"}
-                read, write, _ = await stack.enter_async_context(
-                    streamablehttp_client(self._upstream_url, headers=headers, timeout=5)
-                )
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-            except BaseException:
-                await stack.aclose()
-                raise
-            self._stack, self._session = stack, session
-        return self._session
-
-    async def _drop(self) -> None:
-        stack, self._stack, self._session = self._stack, None, None
-        if stack is not None:
-            try:
-                await stack.aclose()
-            except BaseException as e:  # a dead transport may not close cleanly
-                logger.debug("Closing upstream session failed: %s", e)
-
     async def _forward(self, method: str, *args: Any) -> Any:
-        """Call the app, reconnecting once; raises when the app is not reachable."""
-        async with self._lock:
-            for attempt in (1, 2):
-                try:
-                    return await getattr(await self._upstream(), method)(*args)
-                except Exception:
-                    await self._drop()
-                    if attempt == 2:
-                        raise
-        raise RuntimeError("unreachable")
+        """Call the app; raises when the app is not reachable."""
+        return await self._upstream.request(method, *args, idempotent=method == "list_tools")
 
     async def list_tools(self) -> list[types.Tool]:
         """Return the app's tools, or the last known list while the app is down."""

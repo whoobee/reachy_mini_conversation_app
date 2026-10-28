@@ -311,3 +311,43 @@ def test_waiting_for_the_user_is_not_busy_but_thinking_and_speaking_are() -> Non
     assert not handler.is_busy()
     handler._speaking = True
     assert handler.is_busy()
+
+
+@pytest.mark.asyncio
+async def test_robot_events_go_ahead_of_the_next_message_in_a_daily_session() -> None:
+    """Wake and other robot events reach Hermes before the user's words; the session id is per day."""
+    handler = _handler()
+    sent: list[tuple[str, dict[str, Any]]] = []
+
+    def hermes(request: httpx.Request) -> httpx.Response:
+        sent.append((request.headers["X-Hermes-Session-Id"], json.loads(request.content)))
+        return httpx.Response(200, content=_sse(_delta("Bine.")), headers={"content-type": "text/event-stream"})
+
+    _wire_clients(handler, b"", [])
+    handler._hermes_http = httpx.AsyncClient(base_url="http://hermes/v1", transport=httpx.MockTransport(hermes))
+    handler._session_id = handler._hermes_session_id()
+    handler.note_event("a sunat alarma Trezirea")
+
+    for text in ("Bună", "Mersi"):
+        await handler._handle_stt_message({"message_type": "committed_transcript", "text": text})
+        assert handler._response_task is not None
+        await handler._response_task
+
+    (first_id, first), (second_id, second) = sent
+    assert first_id == second_id and first_id.startswith("reachy-20")
+    first_text = first["messages"][0]["content"]
+    assert first_text.startswith("[Reachy: ") and "a sunat alarma Trezirea]" in first_text
+    assert first_text.endswith("\nBună")
+    assert second["messages"][0]["content"] == "Mersi"
+
+
+@pytest.mark.asyncio
+async def test_ignored_noise_is_noted_but_a_bare_wake_phrase_is_not(monkeypatch: Any) -> None:
+    """Filler that is dropped shows up as an event; hearing only the wake phrase does not."""
+    monkeypatch.setattr(config, "WAKE_PHRASE", "hei reachy")
+    handler = _handler()
+
+    await handler._handle_stt_message({"message_type": "committed_transcript", "text": "Hei Reachy!"})
+    assert not handler._events.pending()
+    await handler._handle_stt_message({"message_type": "committed_transcript", "text": "Ăăă..."})
+    assert "ignorat (zgomot/umplutură): «Ăăă...»" in handler._events.take_prefix()

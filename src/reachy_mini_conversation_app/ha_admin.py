@@ -14,10 +14,11 @@ from __future__ import annotations
 import re
 import json
 import time
-import asyncio
 import logging
 from typing import Any, Final
 from collections.abc import Callable
+
+from reachy_mini_conversation_app.persistent_mcp import PersistentMcpClient
 
 
 logger = logging.getLogger(__name__)
@@ -91,52 +92,20 @@ class HaAdmin:
         self._tools: dict[str, dict[str, Any]] = {}
         self._read_only: set[str] = set()
         self._listed_at = 0.0
-        self._sessions: dict[str, tuple[Any, Any]] = {}
-        self._lock = asyncio.Lock()
-
-    async def _session(self, url: str) -> Any:
-        """Return a connected MCP session for ``url``, opening it on first use."""
-        from contextlib import AsyncExitStack
-
-        from mcp import ClientSession
-        from mcp.client.streamable_http import streamablehttp_client
-
-        if url not in self._sessions:
-            stack = AsyncExitStack()
-            try:
-                read, write, _ = await stack.enter_async_context(streamablehttp_client(url))
-                session = await stack.enter_async_context(ClientSession(read, write))
-                await session.initialize()
-            except BaseException:
-                await stack.aclose()
-                raise
-            self._sessions[url] = (stack, session)
-        return self._sessions[url][1]
-
-    async def _drop_session(self, url: str) -> None:
-        stack_and_session = self._sessions.pop(url, None)
-        if stack_and_session is not None:
-            try:
-                await stack_and_session[0].aclose()
-            except BaseException as e:  # a broken transport may fail to close cleanly
-                logger.debug("Closing ha-mcp session failed: %s", e)
+        self._clients: dict[str, PersistentMcpClient] = {}
 
     async def _session_call(self, url: str, method: str, *args: Any) -> Any:
-        """Call ``method`` on a persistent session, reconnecting once if the connection dropped."""
-        async with self._lock:
-            for attempt in (1, 2):
-                try:
-                    session = await self._session(url)
-                    return await getattr(session, method)(*args)
-                except Exception:
-                    await self._drop_session(url)
-                    if attempt == 2:
-                        raise
+        """Call ``method`` on a persistent session for ``url`` (reconnects after ha-mcp restarts)."""
+        client = self._clients.get(url)
+        if client is None:
+            client = self._clients[url] = PersistentMcpClient(url)
+        return await client.request(method, *args, idempotent=method == "list_tools")
 
     async def close(self) -> None:
         """Close the persistent sessions."""
-        for url in list(self._sessions):
-            await self._drop_session(url)
+        for client in self._clients.values():
+            await client.close()
+        self._clients.clear()
 
     async def _ensure_tools(self) -> None:
         if self._tools and time.monotonic() - self._listed_at < TOOL_LIST_TTL_S:
@@ -201,7 +170,16 @@ class HaAdmin:
             try:
                 tool_arguments = json.loads(tool_arguments)
             except ValueError:
-                return {"error": "arguments must be a JSON object"}
+                return {"error": "arguments must be a JSON object string"}
+        if not isinstance(tool_arguments, dict):
+            return {"error": "arguments must be a JSON object string"}
+        required = self._tools[name]["inputSchema"].get("required") or []
+        missing = [key for key in required if key not in tool_arguments]
+        if missing:
+            return {
+                "error": f"missing required arguments: {', '.join(missing)}. Pass them in arguments as a JSON "
+                f"object string, e.g. {json.dumps(dict.fromkeys(missing, '...'))}; nothing was run."
+            }
         kind = self._kind(name)
         if kind == "write" and not self.mode.active:
             return {
@@ -315,7 +293,11 @@ TOOL_DEFINITIONS: Final[dict[str, tuple[str, dict[str, Any]]]] = {
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Tool name from ha_find_tools."},
-                "arguments": {"type": "object", "description": "Tool arguments as described by ha_describe_tool."},
+                "arguments": {
+                    "type": "string",
+                    "description": "The tool's arguments as a JSON object string, with the parameters from "
+                    'ha_describe_tool, e.g. \'{"device_id": "abc123"}\'. Use "{}" only for tools without parameters.',
+                },
             },
             "required": ["name"],
         },
@@ -330,7 +312,10 @@ TOOL_DEFINITIONS: Final[dict[str, tuple[str, dict[str, Any]]]] = {
                 "domain": {"type": "string", "description": "Service domain, e.g. 'light', 'cover'."},
                 "service": {"type": "string", "description": "Service, e.g. 'turn_on', 'turn_off', 'open_cover'."},
                 "entity_id": {"type": "string", "description": "Target entity id."},
-                "data": {"type": "object", "description": "Extra service data, e.g. {'brightness_pct': 50}."},
+                "data": {
+                    "type": "string",
+                    "description": "Optional extra service data as a JSON object string, e.g. '{\"brightness_pct\": 50}'.",
+                },
             },
             "required": ["domain", "service", "entity_id"],
         },

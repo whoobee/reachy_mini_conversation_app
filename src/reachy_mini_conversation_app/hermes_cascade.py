@@ -20,6 +20,7 @@ import types
 import base64
 import asyncio
 import logging
+import datetime as dt
 from typing import Any, Final, Optional
 from pathlib import Path
 from contextlib import AbstractAsyncContextManager
@@ -43,6 +44,7 @@ from reachy_mini_conversation_app.ha_admin import TOOL_DEFINITIONS as HA_ADMIN_T
 from reachy_mini_conversation_app.ha_admin import HaAdmin, EngineeringMode
 from reachy_mini_conversation_app.robot_mcp import RobotMcpServer, parse_tool_names
 from reachy_mini_conversation_app.streaming import AdditionalOutputs, audio_to_int16
+from reachy_mini_conversation_app.robot_events import RobotEventLog
 from reachy_mini_conversation_app.elevenlabs_api import (
     ELEVENLABS_WS_BASE,
     voice_name_for,
@@ -346,6 +348,7 @@ class HermesCascadeHandler(ConversationHandler):
         self._weather = WeatherService(config.WEATHER_LOCATION)
         news_path = Path(config.NEWS_FEEDS_FILE) if config.NEWS_FEEDS_FILE else alarm_root / "news_feeds.json"
         self._news = NewsService(news_path, timezone=self._alarm_clock.tz)
+        self._events = RobotEventLog(alarm_root / "robot_events.json", self._alarm_clock.tz)
         self._engineering = EngineeringMode(config.ENGINEERING_MODE_TIMEOUT_MIN)
         ha_mcp_url = (config.HA_MCP_URL or "").strip()
         self._ha_admin = HaAdmin(ha_mcp_url, self._engineering, config.HA_PROTECTED_PATTERN) if ha_mcp_url else None
@@ -380,6 +383,14 @@ class HermesCascadeHandler(ConversationHandler):
         """Busy while thinking or speaking (incl. alarms); merely waiting for the user is not busy."""
         return self._is_busy()
 
+    def note_event(self, text: str) -> None:
+        """Record a robot event for the Hermes session (sent ahead of the next user message)."""
+        self._events.note(text)
+
+    def _hermes_session_id(self) -> str:
+        """One Hermes session per local day, so a day's conversations read as one history."""
+        return f"reachy-{dt.datetime.now(self._alarm_clock.tz).date().isoformat()}"
+
     async def start_up(self) -> None:
         """Connect clients, load the wake word model, then supervise conversations until shutdown."""
         base_url = (config.HERMES_BASE_URL or "").strip()
@@ -408,6 +419,7 @@ class HermesCascadeHandler(ConversationHandler):
         self.tool_manager.start_up(tool_callbacks=[self._on_tool_done])
         self._start_robot_mcp()
         self._running = True
+        self.note_event("aplicația a pornit")
         logger.info(
             "Hermes voice loop ready: wake word=%s hermes=%s model=%s tts=%s voice=%s language=%s",
             config.WAKE_WORD,
@@ -434,6 +446,7 @@ class HermesCascadeHandler(ConversationHandler):
             asyncio.create_task(self._ring(alarm), name=f"alarm-{alarm.id}")
         if self._engineering.expired_since_check():
             logger.info("Engineering mode timed out")
+            self.note_event("modul inginer s-a închis (inactivitate)")
             if self._tts_http is not None:
                 asyncio.create_task(self._speak("Modul inginer s-a închis."), name="engineering-mode-off")
         now = time.monotonic()
@@ -640,6 +653,7 @@ class HermesCascadeHandler(ConversationHandler):
     async def _ring(self, alarm: Alarm) -> None:
         """Chime and announce a due timer or alarm, even outside a conversation."""
         logger.info("Ringing %s %s (%s)", alarm.kind, alarm.id, alarm.label or "no label")
+        self.note_event(f"a sunat {'alarma' if alarm.kind == 'alarm' else 'temporizatorul'} {alarm.label or alarm.id}")
         self._mark_activity("alarm")
         try:
             await self._play(chime(SAMPLE_RATE))
@@ -660,6 +674,7 @@ class HermesCascadeHandler(ConversationHandler):
     async def _go_to_sleep(self) -> None:
         """Run the app's sleep-and-stop routine (sleep pose, then the app stops)."""
         await self._end_conversation("going to sleep")
+        self.note_event("a adormit la cerere (aplicația s-a oprit)")
         if self.deps.go_to_sleep is None:
             return
         logger.info("Going to sleep and stopping the app")
@@ -726,7 +741,9 @@ class HermesCascadeHandler(ConversationHandler):
         """Start a conversation: acknowledge, then open the Scribe session."""
         logger.info("Wake word detected")
         self._active = True
-        self._session_id = f"reachy-{time.time_ns()}"
+        self._session_id = self._hermes_session_id()
+        score = float(getattr(self._detector, "last_score", 0.0) or 0.0)
+        self.note_event(f"trezit de cuvântul de activare (scor {score:.2f})")
         self._last_user_activity = time.monotonic()
         self._pending_audio = []
         self._send_buffer = np.zeros(0, dtype=np.int16)
@@ -743,6 +760,8 @@ class HermesCascadeHandler(ConversationHandler):
             return
         logger.info("Conversation ended (%s)", reason)
         self._active = False
+        if reason != "silence timeout":  # the normal end is not worth a note
+            self.note_event(f"conversație încheiată ({reason})")
         await self._cancel_response()
         stt_task, self._stt_task = self._stt_task, None
         ws, self._stt_ws = self._stt_ws, None
@@ -800,7 +819,8 @@ class HermesCascadeHandler(ConversationHandler):
     async def _handle_stt_message(self, message: dict[str, Any]) -> None:
         """React to one Scribe server message."""
         message_type = message.get("message_type")
-        text = strip_wake_phrase(str(message.get("text") or ""), wake_phrase())
+        raw_text = str(message.get("text") or "").strip()
+        text = strip_wake_phrase(raw_text, wake_phrase())
         if is_filler_only(text):
             text = ""
 
@@ -814,9 +834,14 @@ class HermesCascadeHandler(ConversationHandler):
             await self.output_queue.put(AdditionalOutputs({"role": "user_partial", "content": text}))
             if config.BARGE_IN and self._is_busy() and len(_WORD.findall(text)) >= _BARGE_IN_MIN_WORDS:
                 logger.info("Barge-in: user started talking over the robot")
+                self.note_event("întrerupt de utilizator în timp ce vorbea")
                 await self._cancel_response()
         elif message_type == "committed_transcript":
             if not text or self._is_echo(text):
+                leftover = strip_wake_phrase(raw_text, wake_phrase())  # empty when only the wake phrase was heard
+                if text or (leftover and is_filler_only(leftover)):
+                    reason = "ecou propriu" if text else "zgomot/umplutură"
+                    self.note_event(f"ignorat ({reason}): «{raw_text[:60]}»")
                 return
             self._last_user_activity = time.monotonic()
             self._mark_activity("user_transcription_completed")
@@ -857,6 +882,11 @@ class HermesCascadeHandler(ConversationHandler):
             self._speaking = False
             self.deps.movement_manager.set_speaking(False)
 
+    def _with_events(self, text: str) -> str:
+        """Put pending robot events in front of the user's words."""
+        prefix = self._events.take_prefix()
+        return f"{prefix}\n{text}" if prefix else text
+
     async def _respond(self, text: str) -> None:
         """Send ``text`` to Hermes and speak the streamed reply sentence by sentence."""
         assert self._hermes_http is not None
@@ -874,7 +904,7 @@ class HermesCascadeHandler(ConversationHandler):
                 json={
                     "model": config.HERMES_MODEL,
                     "stream": True,
-                    "messages": [{"role": "user", "content": text}],
+                    "messages": [{"role": "user", "content": self._with_events(text)}],
                 },
             ) as response:
                 if response.is_error:

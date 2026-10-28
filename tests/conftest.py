@@ -4,6 +4,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 
 PROJECT_ROOT = Path(__file__).parents[1].resolve()
 SRC_PATH = PROJECT_ROOT / "src"
@@ -18,3 +20,14 @@ os.environ["REACHY_MINI_SKIP_DOTENV"] = "1"
 os.environ.pop("REACHY_MINI_CUSTOM_PROFILE", None)
 os.environ.pop("REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY", None)
 os.environ.pop("REACHY_MINI_EXTERNAL_TOOLS_DIRECTORY", None)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_robot_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep handlers built without instance_path from writing robot events into ~/.cache."""
+    import reachy_mini_conversation_app.hermes_cascade as hermes_cascade
+
+    real = hermes_cascade.RobotEventLog
+    monkeypatch.setattr(
+        hermes_cascade, "RobotEventLog", lambda _path, tz=None: real(tmp_path / "robot_events.json", tz)
+    )
